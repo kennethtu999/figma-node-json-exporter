@@ -1,0 +1,29 @@
+<script>
+  // 監聽來自 code.ts 的訊息
+  window.onmessage = async (event) => {
+    const msg = event.data.pluginMessage;
+    
+    if (msg && msg.type === 'export-json') {
+      // 將收到的資料轉為格式化的 JSON 字串
+      const jsonString = JSON.stringify(msg.data, null, 2);
+      
+      // 建立一個 Blob 物件
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      // 建立一個隱藏的 <a> 標籤來觸發下載
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `figma-node-${msg.fileName}.json`; 
+      document.body.appendChild(a);
+      a.click(); // 模擬點擊下載
+      
+      // 清理記憶體
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      // 通知 code.ts 關閉 Plugin
+      parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
+    }
+  };
+</script>
