@@ -51,6 +51,8 @@
       }
 
       .selection,
+      .picker,
+      .pages-list,
       .bundle,
       .status {
         padding: 10px 12px;
@@ -63,6 +65,125 @@
         margin-bottom: 14px;
         background: #f3e7d3;
         color: #57442f;
+      }
+
+      .picker,
+      .pages-list {
+        margin-bottom: 14px;
+        background: #fffaf2;
+        border: 1px solid rgba(113, 79, 43, 0.12);
+        color: #6b573f;
+      }
+
+      .picker strong,
+      .pages-list strong {
+        display: block;
+        margin-bottom: 8px;
+        color: #4f3c29;
+      }
+
+      .picker-note {
+        color: #7a6650;
+      }
+
+      .mode-switch {
+        display: grid;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .mode-option {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+      }
+
+      .mode-option input {
+        margin-top: 2px;
+      }
+
+      .page-group + .page-group {
+        margin-top: 12px;
+      }
+
+      .page-group-title {
+        margin-bottom: 8px;
+        color: #4f3c29;
+      }
+
+      .page-group-meta {
+        color: #7a6650;
+      }
+
+      .view-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .view-card {
+        border: 1px solid rgba(113, 79, 43, 0.12);
+        border-radius: 10px;
+        padding: 10px;
+        background: rgba(255, 252, 247, 0.92);
+      }
+
+      .view-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+
+      .view-head strong {
+        margin-bottom: 0;
+      }
+
+      .view-name {
+        color: #6b573f;
+      }
+
+      .view-coords {
+        color: #7a6650;
+      }
+
+      .view-controls {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .view-controls label {
+        display: block;
+        color: #6b573f;
+      }
+
+      .view-controls span {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      .view-controls input {
+        width: 100%;
+        border: 1px solid rgba(113, 79, 43, 0.18);
+        border-radius: 10px;
+        padding: 8px 10px;
+        font: inherit;
+        color: #1f1a17;
+        background: #fffdf9;
+      }
+
+      .view-frame-names {
+        margin-top: 4px;
+        color: #7a6650;
+      }
+
+      .pages-list ul {
+        margin: 0;
+        padding-left: 18px;
+      }
+
+      .pages-list li + li {
+        margin-top: 6px;
       }
 
       .bundle {
@@ -128,7 +249,7 @@
   <body>
     <div class="panel">
       <h1>AI ZIP 匯出</h1>
-      <p class="subtext">按下後會直接產生並下載單一 ZIP，完成後自動關閉 plugin。</p>
+      <p class="subtext">按下後會依畫面位置整理成 Page/View ZIP，完成後自動關閉 plugin。</p>
 
       <div class="actions">
         <button id="close-button" class="secondary" type="button">關閉</button>
@@ -137,13 +258,31 @@
 
       <div id="selection-info" class="selection">讀取選取資訊中...</div>
 
+      <div class="picker">
+        <strong>匯出設定</strong>
+        <div id="picker-note" class="picker-note">全部 View 會一起匯出，可在下方逐筆調整 Page Number / View Number。</div>
+        <div class="mode-switch">
+          <label class="mode-option">
+            <input type="radio" name="export-mode" value="paged" checked />
+            <span>`Page/View` 模式：每個 View 各 1 張完整圖與 JSON。</span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="export-mode" value="all-in-one" />
+            <span>`All in one` 模式：整個容器只輸出 1 份 JSON + 1 張完整圖。</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="pages-list">
+        <strong>偵測到的 Page / View</strong>
+        <div id="pages-list-content">尚未分析。</div>
+      </div>
+
       <div class="bundle">
         <strong>ZIP 結構</strong>
         <ul>
-          <li><code>structure.json</code></li>
-          <li><code>structure-lite.json</code></li>
-          <li><code>texts.jsonl</code></li>
-          <li><code>tiles/*.png</code></li>
+          <li><code>Page/View</code>：<code>manifest.json</code>、<code>pages/PageN/page.json</code>、<code>pages/PageN/views/PageN-ViewM/image.png</code></li>
+          <li><code>All in one</code>：<code>structure.json</code>、<code>image.png</code></li>
         </ul>
       </div>
 
@@ -151,12 +290,14 @@
     </div>
 
     <script>
-      const TILE_SIZE = 1536;
-      const TILE_OVERLAP = 128;
       const selectionInfo = document.getElementById('selection-info');
       const closeButton = document.getElementById('close-button');
       const prepareButton = document.getElementById('prepare-button');
       const statusBox = document.getElementById('status');
+      const pickerNote = document.getElementById('picker-note');
+      const pagesListContent = document.getElementById('pages-list-content');
+      const exportModeInputs = Array.from(document.querySelectorAll('input[name="export-mode"]'));
+      let currentPages = [];
 
       const crcTable = (() => {
         const table = new Uint32Array(256);
@@ -189,6 +330,15 @@
         } else if (!isLoading) {
           statusBox.classList.remove('is-visible');
         }
+      }
+
+      function escapeHtml(text) {
+        return String(text)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#39;');
       }
 
       function downloadBlob(blob, fileName) {
@@ -372,15 +522,7 @@
 
       function buildTextsJsonl(structureJson) {
         const entries = [];
-
-        if (Array.isArray(structureJson)) {
-          structureJson.forEach((node) => {
-            collectTextEntries(node, [], entries);
-          });
-        } else {
-          collectTextEntries(structureJson, [], entries);
-        }
-
+        collectTextEntries(structureJson, [], entries);
         return entries.map((entry) => JSON.stringify(entry)).join('\n');
       }
 
@@ -390,53 +532,6 @@
         }
 
         return textsJsonl.split('\n').filter((line) => line.length > 0).length;
-      }
-
-      function createAxisPositions(total, tileSize, overlap) {
-        if (total <= tileSize) {
-          return [0];
-        }
-
-        const stride = tileSize - overlap;
-        const positions = [];
-        let current = 0;
-
-        while (true) {
-          positions.push(current);
-          if (current + tileSize >= total) {
-            break;
-          }
-
-          let next = current + stride;
-          if (next + tileSize >= total) {
-            next = total - tileSize;
-          }
-
-          if (positions[positions.length - 1] === next) {
-            break;
-          }
-
-          current = next;
-        }
-
-        return positions;
-      }
-
-      function blobToUint8Array(blob) {
-        return blob.arrayBuffer().then((buffer) => new Uint8Array(buffer));
-      }
-
-      function canvasToPngBytes(canvas) {
-        return new Promise((resolve, reject) => {
-          canvas.toBlob((blob) => {
-            if (!blob) {
-              reject(new Error('無法建立 PNG blob。'));
-              return;
-            }
-
-            blobToUint8Array(blob).then(resolve).catch(reject);
-          }, 'image/png');
-        });
       }
 
       function loadImageFromBytes(bytes) {
@@ -457,110 +552,269 @@
         });
       }
 
-      async function createTileAssets(image) {
-        const xPositions = createAxisPositions(image.width, TILE_SIZE, TILE_OVERLAP);
-        const yPositions = createAxisPositions(image.height, TILE_SIZE, TILE_OVERLAP);
-        const tiles = [];
-
-        for (let row = 0; row < yPositions.length; row += 1) {
-          for (let column = 0; column < xPositions.length; column += 1) {
-            const x = xPositions[column];
-            const y = yPositions[row];
-            const width = Math.min(TILE_SIZE, image.width - x);
-            const height = Math.min(TILE_SIZE, image.height - y);
-            const canvas = document.createElement('canvas');
-            canvas.width = width;
-            canvas.height = height;
-            const context = canvas.getContext('2d');
-
-            if (!context) {
-              throw new Error('無法建立 tile canvas。');
-            }
-
-            context.drawImage(image, x, y, width, height, 0, 0, width, height);
-            const bytes = await canvasToPngBytes(canvas);
-            const path =
-              'tiles/'
-              + 'tile-r' + String(row).padStart(2, '0')
-              + '-c' + String(column).padStart(2, '0')
-              + '-x' + x
-              + '-y' + y
-              + '-w' + width
-              + '-h' + height
-              + '.png';
-
-            tiles.push({
-              path,
-              x,
-              y,
-              width,
-              height,
-              bytes,
-            });
-          }
-        }
-
-        return tiles;
-      }
-
       function buildStructureLite(structureJson, imageMeta, textCount) {
-        const roots = Array.isArray(structureJson)
-          ? structureJson.map((node) => toLiteNode(node))
-          : [toLiteNode(structureJson)];
-
         return {
           format: 'figma-ai-content.v1',
           image: imageMeta,
           stats: {
-            rootCount: roots.length,
+            rootCount: 1,
             textCount,
           },
-          roots,
+          roots: [toLiteNode(structureJson)],
         };
       }
 
-      async function buildAiZipPayload(payload) {
-        const tilePngBytes = new Uint8Array(payload.tilePngBytes);
-        const tileImage = await loadImageFromBytes(tilePngBytes);
-        const tiles = await createTileAssets(tileImage);
-        const textsJsonl = buildTextsJsonl(payload.structureJson);
+      function createPageName(pageNumber) {
+        return 'Page' + String(pageNumber);
+      }
+
+      function createViewName(pageNumber, viewNumber) {
+        return createPageName(pageNumber) + '-View' + String(viewNumber);
+      }
+
+      function getPageSummary(pageNumber) {
+        return currentPages.find((page) => page.pageNumber === pageNumber) || null;
+      }
+
+      function formatRelativeValue(value) {
+        return Number.isFinite(value) ? value.toFixed(2) : '0.00';
+      }
+
+      function renderPagesList() {
+        if (!currentPages.length) {
+          pagesListContent.textContent = '目前沒有可用的 Page / View。';
+          return;
+        }
+
+        const items = currentPages.map((page) => {
+          const pageTitle = escapeHtml(page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || createPageName(page.pageNumber));
+          const frameNames = Array.isArray(page.frameNames) && page.frameNames.length
+            ? '<div class="view-frame-names">Frame Names: ' + escapeHtml(page.frameNames.join(' / ')) + '</div>'
+            : '';
+          const views = page.views
+            .map((view) => {
+              const relativeX = formatRelativeValue(view.relativeTopLeft?.x);
+              const relativeY = formatRelativeValue(view.relativeTopLeft?.y);
+
+              return ''
+                + '<div class="view-card" data-frame-id="' + escapeHtml(view.frameId) + '">'
+                + '<div class="view-head">'
+                + '<strong>' + escapeHtml(createViewName(page.pageNumber, view.viewNumber)) + '</strong>'
+                + '<span class="view-name">' + escapeHtml(view.frameName) + '</span>'
+                + '</div>'
+                + '<div class="view-coords">左上相對座標 x=' + relativeX + ', y=' + relativeY + '</div>'
+                + '<div class="view-controls">'
+                + '<label><span>Page Number</span><input class="page-override-input" type="number" min="1" step="1" value="' + String(page.pageNumber) + '" /></label>'
+                + '<label><span>View Number</span><input class="view-override-input" type="number" min="1" step="1" value="' + String(view.viewNumber) + '" /></label>'
+                + '</div>'
+                + '</div>';
+            })
+            .join('');
+
+          return ''
+            + '<div class="page-group">'
+            + '<div class="page-group-title"><strong>' + createPageName(page.pageNumber) + '</strong> - ' + pageTitle + '</div>'
+            + frameNames
+            + '<div class="view-list">' + views + '</div>'
+            + '</div>';
+        }).join('');
+
+        pagesListContent.innerHTML = items;
+      }
+
+      function updatePickerSummary() {
+        if (!currentPages.length) {
+          pickerNote.textContent = '目前沒有可用的 Page / View。';
+          return;
+        }
+
+        const totalViews = currentPages.reduce((sum, page) => sum + (page.viewCount || page.views.length || 0), 0);
+        pickerNote.textContent =
+          '目前共 ' + String(currentPages.length) + ' 個 Page、' + String(totalViews) + ' 個 View，下載時會全部一起匯出。';
+      }
+
+      function normalizeInteger(value, fallback) {
+        const parsed = Number.parseInt(String(value), 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+      }
+
+      function collectOverrides() {
+        if (!currentPages.length) {
+          return [];
+        }
+
+        const rows = Array.from(pagesListContent.querySelectorAll('[data-frame-id]'));
+        const seen = new Set();
+
+        return rows.map((row) => {
+          const frameId = row.getAttribute('data-frame-id') || '';
+          const pageNumberInput = row.querySelector('.page-override-input');
+          const viewNumberInput = row.querySelector('.view-override-input');
+          const pageNumber = normalizeInteger(pageNumberInput?.value, 1);
+          const viewNumber = normalizeInteger(viewNumberInput?.value, 1);
+          const duplicateKey = String(pageNumber) + ':' + String(viewNumber);
+
+          if (seen.has(duplicateKey)) {
+            throw new Error(`Page${String(pageNumber)} / View${String(viewNumber)} 重複，請調整編號。`);
+          }
+
+          seen.add(duplicateKey);
+
+          if (pageNumberInput) {
+            pageNumberInput.value = String(pageNumber);
+          }
+
+          if (viewNumberInput) {
+            viewNumberInput.value = String(viewNumber);
+          }
+
+          return {
+            frameId,
+            pageNumber,
+            viewNumber,
+          };
+        });
+      }
+
+      async function buildViewBundle(viewPayload) {
+        const sourcePngBytes = new Uint8Array(viewPayload.pngBytes);
+        const sourceImage = await loadImageFromBytes(sourcePngBytes);
+        const textsJsonl = buildTextsJsonl(viewPayload.structureJson);
         const textCount = countTextEntries(textsJsonl);
         const imageMeta = {
-          tiling: {
-            tileSize: TILE_SIZE,
-            overlap: TILE_OVERLAP,
-            count: tiles.length,
-            sourceScale: 1,
-          },
-          tiles: tiles.map((tile) => ({
-            path: tile.path,
-            x: tile.x,
-            y: tile.y,
-            width: tile.width,
-            height: tile.height,
-          })),
+          path: 'image.png',
+          width: sourceImage.width,
+          height: sourceImage.height,
+          sourceScale: 1,
         };
-        const structureLite = buildStructureLite(payload.structureJson, imageMeta, textCount);
-        const entries = [
-          {
-            path: 'structure.json',
-            data: encodeText(JSON.stringify(payload.structureJson, null, 2)),
-          },
-          {
-            path: 'structure-lite.json',
-            data: encodeText(JSON.stringify(structureLite, null, 2)),
-          },
-          {
-            path: 'texts.jsonl',
-            data: encodeText(textsJsonl),
-          },
-        ];
+        const structureLite = buildStructureLite(viewPayload.structureJson, imageMeta, textCount);
 
-        tiles.forEach((tile) => {
+        return {
+          imageMeta,
+          structureLite,
+          textsJsonl,
+          textCount,
+          imageWidth: sourceImage.width,
+          imageHeight: sourceImage.height,
+          imageBytes: sourcePngBytes,
+        };
+      }
+
+      function getSelectedExportMode() {
+        return exportModeInputs.find((input) => input.checked)?.value || 'paged';
+      }
+
+      async function buildPagedZipPayload(payload) {
+        const entries = [];
+        const manifestPages = [];
+        let totalViewCount = 0;
+
+        for (const page of payload.pages) {
+          const pageName = createPageName(page.pageNumber);
+          const pageDir = 'pages/' + pageName;
+          const pageViews = [];
+
+          for (const view of page.views) {
+            const viewName = createViewName(page.pageNumber, view.viewNumber);
+            const viewDir = pageDir + '/views/' + viewName;
+
+            setLoading(true, '正在整理 ' + pageName + ' / View' + String(view.viewNumber) + '...');
+
+            const viewBundle = await buildViewBundle(view);
+
+            entries.push({
+              path: viewDir + '/structure.json',
+              data: encodeText(JSON.stringify(view.structureJson, null, 2)),
+            });
+            entries.push({
+              path: viewDir + '/structure-lite.json',
+              data: encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
+            });
+            entries.push({
+              path: viewDir + '/texts.jsonl',
+              data: encodeText(viewBundle.textsJsonl),
+            });
+            entries.push({
+              path: viewDir + '/image.png',
+              data: viewBundle.imageBytes,
+            });
+
+            pageViews.push({
+              viewNumber: view.viewNumber,
+              name: viewName,
+              frameId: view.frameId,
+              frameName: view.frameName,
+              bounds: view.bounds,
+              relativeTopLeft: view.relativeTopLeft,
+              path: viewDir,
+              image: {
+                width: viewBundle.imageWidth,
+                height: viewBundle.imageHeight,
+                path: viewDir + '/image.png',
+              },
+              textCount: viewBundle.textCount,
+            });
+          }
+
+          const pageJson = {
+            format: 'figma-ai-page.v1',
+            source: {
+              containerId: payload.containerId,
+              containerName: payload.containerName,
+            },
+            pageNumber: page.pageNumber,
+            name: pageName,
+            label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
+            viewCount: pageViews.length,
+            frameNames: Array.isArray(page.frameNames) && page.frameNames.length
+              ? page.frameNames
+              : pageViews.map((view) => view.frameName),
+            views: pageViews,
+          };
+
           entries.push({
-            path: tile.path,
-            data: tile.bytes,
+            path: pageDir + '/page.json',
+            data: encodeText(JSON.stringify(pageJson, null, 2)),
           });
+
+          manifestPages.push({
+            pageNumber: page.pageNumber,
+            name: pageName,
+            label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
+            viewCount: pageViews.length,
+            frameNames: Array.isArray(page.frameNames) && page.frameNames.length
+              ? page.frameNames
+              : pageViews.map((view) => view.frameName),
+            views: pageViews.map((view) => ({
+              viewNumber: view.viewNumber,
+              name: view.name,
+              frameId: view.frameId,
+              frameName: view.frameName,
+              bounds: view.bounds,
+              relativeTopLeft: view.relativeTopLeft,
+              path: view.path,
+            })),
+          });
+
+          totalViewCount += pageViews.length;
+        }
+
+        const manifest = {
+          format: 'figma-ai-pack.v2',
+          source: {
+            id: payload.containerId,
+            name: payload.containerName,
+          },
+          pageCount: payload.pages.length,
+          totalViewCount,
+          ignoredNodeCount: payload.ignoredNodes.count,
+          ignoredNodes: payload.ignoredNodes.items,
+          pages: manifestPages,
+        };
+
+        entries.unshift({
+          path: 'manifest.json',
+          data: encodeText(JSON.stringify(manifest, null, 2)),
         });
 
         const zipEntries = entries.map((entry) => ({
@@ -573,9 +827,64 @@
         return {
           blob: createZip(zipEntries),
           fileName: 'figma-ai-pack-' + payload.fileName + '.zip',
-          tileCount: tiles.length,
-          imageWidth: tileImage.width,
-          imageHeight: tileImage.height,
+          pageCount: payload.pages.length,
+          totalViewCount,
+        };
+      }
+
+      async function buildAllInOneZipPayload(payload) {
+        const containerPngBytes = new Uint8Array(payload.containerPngBytes);
+        const containerImage = await loadImageFromBytes(containerPngBytes);
+        const allInOneJson = {
+          format: 'figma-ai-all-in-one.v1',
+          source: {
+            id: payload.containerId,
+            name: payload.containerName,
+          },
+          image: {
+            path: 'image.png',
+            width: containerImage.width,
+            height: containerImage.height,
+            sourceScale: 1,
+          },
+          ignoredNodeCount: payload.ignoredNodes.count,
+          ignoredNodes: payload.ignoredNodes.items,
+          pages: payload.pages.map((page) => ({
+            pageNumber: page.pageNumber,
+            pageLabel: page.pageLabel,
+            frameNames: page.frameNames,
+            views: page.views.map((view) => ({
+              viewNumber: view.viewNumber,
+              frameId: view.frameId,
+              frameName: view.frameName,
+              bounds: view.bounds,
+              relativeTopLeft: view.relativeTopLeft,
+            })),
+          })),
+          structure: payload.containerStructureJson,
+        };
+
+        const entries = [
+          {
+            path: 'structure.json',
+            data: encodeText(JSON.stringify(allInOneJson, null, 2)),
+          },
+          {
+            path: 'image.png',
+            data: containerPngBytes,
+          },
+        ];
+
+        const zipEntries = entries.map((entry) => ({
+          nameBytes: encodeText(entry.path),
+          data: entry.data,
+          crc: crc32(entry.data),
+          localHeaderOffset: 0,
+        }));
+
+        return {
+          blob: createZip(zipEntries),
+          fileName: 'figma-ai-pack-' + payload.fileName + '-all-in-one.zip',
         };
       }
 
@@ -584,8 +893,25 @@
       });
 
       prepareButton.addEventListener('click', () => {
-        setLoading(true, '正在擷取原圖、切 tiles，並打包 ZIP...');
-        parent.postMessage({ pluginMessage: { type: 'prepare-zip' } }, '*');
+        const exportMode = getSelectedExportMode();
+        setLoading(true, exportMode === 'all-in-one' ? '正在準備 All in one ZIP...' : '正在分析 Page/View 並建立 ZIP...');
+        try {
+          const overrides = collectOverrides();
+          parent.postMessage({
+            pluginMessage: {
+              type: 'prepare-zip',
+              overrides,
+            },
+          }, '*');
+        } catch (error) {
+          setLoading(false, '');
+          parent.postMessage({
+            pluginMessage: {
+              type: 'error',
+              message: error instanceof Error ? error.message : '匯出編號設定有誤。',
+            },
+          }, '*');
+        }
       });
 
       window.onmessage = async (event) => {
@@ -597,11 +923,28 @@
 
         if (msg.type === 'selection-info') {
           if (msg.selectionCount === 0) {
-            selectionInfo.textContent = '目前沒有選取任何物件。';
-          } else if (msg.selectionCount === 1) {
-            selectionInfo.textContent = '目前選取：' + msg.firstSelectionName;
+            selectionInfo.textContent = '目前沒有選取任何物件，請先選一個父層容器。';
+            currentPages = [];
+            renderPagesList();
+            updatePickerSummary();
+          } else if (msg.selectionCount !== 1) {
+            selectionInfo.textContent = '目前選取 ' + String(msg.selectionCount) + ' 個物件，請只保留一個父層容器。';
+            currentPages = [];
+            renderPagesList();
+            updatePickerSummary();
+          } else if (!msg.isContainer) {
+            selectionInfo.textContent = '目前選取：' + msg.firstSelectionName + '。這不是可分析的父層容器。';
+            currentPages = [];
+            renderPagesList();
+            updatePickerSummary();
           } else {
-            selectionInfo.textContent = '目前選取 ' + String(msg.selectionCount) + ' 個物件，ZIP 內的圖像會以整個選取範圍輸出。';
+            selectionInfo.textContent =
+              '目前選取：' + msg.firstSelectionName
+              + '。第一層會匯出 ' + String(msg.eligibleFrameCount || 0) + ' 個 FRAME'
+              + '，忽略 ' + String(msg.ignoredNodeCount || 0) + ' 個非頁面節點。';
+            currentPages = Array.isArray(msg.pages) ? msg.pages : [];
+            renderPagesList();
+            updatePickerSummary();
           }
         }
 
@@ -611,8 +954,11 @@
 
         if (msg.type === 'prepare-zip-data') {
           try {
-            setLoading(true, '正在建立 ZIP...');
-            const zipPayload = await buildAiZipPayload(msg);
+            const exportMode = getSelectedExportMode();
+            setLoading(true, exportMode === 'all-in-one' ? '正在建立 All in one ZIP...' : '正在建立 Page/View ZIP...');
+            const zipPayload = exportMode === 'all-in-one'
+              ? await buildAllInOneZipPayload(msg)
+              : await buildPagedZipPayload(msg);
             downloadBlob(zipPayload.blob, zipPayload.fileName);
             setLoading(true, 'ZIP 已觸發下載，正在關閉 plugin...');
             parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
@@ -628,6 +974,9 @@
           }
         }
       };
+
+      renderPagesList();
+      updatePickerSummary();
     </script>
   </body>
 </html>

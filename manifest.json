@@ -1,5 +1,5 @@
 {
-  "name": "EXPORT JSON",
+  "name": "Node to JSON Exporter",
   "id": "1618801841932883571",
   "api": "1.0.0",
   "main": "code.js",

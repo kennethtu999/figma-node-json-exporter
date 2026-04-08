@@ -1,7 +1,7 @@
 {
-  "name": "EXPORT-JSON",
+  "name": "figma-node-json-exporter",
   "version": "1.0.0",
-  "description": "Your Figma Plugin",
+  "description": "Export selected Figma nodes to lightweight JSON",
   "main": "code.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
