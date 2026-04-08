@@ -5,6 +5,7 @@
 
 - `Page/View`：依第一層 `FRAME` 的版面位置切成多個 page，每個 view 各輸出 1 張完整圖片與對應 JSON。
 - `All in one`：整個容器只輸出 1 份 JSON + 1 張完整圖片，不做切頁。
+- 兩種模式的 ZIP 根目錄都會額外附一個 `index.html`，方便直接預覽圖片。
 
 專案目前直接保留根目錄的 `code.js` 編譯結果。下載整個專案後，可以直接用根目錄的 `manifest.json` 載入 plugin，不一定要先自行 build。
 
@@ -61,12 +62,14 @@ figma 輸出有兩種模式。
 
 1. Page/View 模式
 - 先讀 manifest.json
+- index.html 可直接總覽所有 view 圖
 - pages[] 是 page / view 對照表
 - 每個 view 會有 frameName、bounds、relativeTopLeft、path
 - 再依 path 讀該 view 的 structure.json、structure-lite.json、texts.jsonl、image.png
 
 2. All in one 模式
 - 先讀根目錄 structure.json
+- index.html 可直接預覽整體圖與 page / view 清單
 - pages[] 是 page / view 對照表
 - structure 是整個容器的完整節點樹
 - image.png 是整體畫面
