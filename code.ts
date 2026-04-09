@@ -1,6 +1,14 @@
 figma.showUI(__html__, { visible: true, width: 800, height: 600 });
 
 const PAGE_OVERLAP_THRESHOLD = 0.3;
+const PAGE_TITLE_MAX_VERTICAL_GAP = 160;
+const MIN_PAGE_CANDIDATE_HEIGHT = 240;
+const MIN_PAGE_CANDIDATE_HEIGHT_TO_WIDTH_RATIO = 0.18;
+const MIN_PAGE_CANDIDATE_DESCENDANT_COUNT = 12;
+const MIN_PAGE_CANDIDATE_TEXT_NODE_COUNT = 6;
+const IGNORED_PRIMARY_TEXT_LABEL_PREFIXES = [
+  'deposits are insured by pdic up to ₱1 million per depositor',
+];
 
 type RectData = {
   x: number;
@@ -12,6 +20,18 @@ type RectData = {
 type RelativePoint = {
   x: number;
   y: number;
+};
+
+type TextLabelCandidate = {
+  text: string;
+  area: number;
+  y: number;
+  x: number;
+};
+
+type PageTitleCandidate = {
+  text: string;
+  bounds: RectData;
 };
 
 type ParsedNode = {
@@ -35,8 +55,14 @@ type IgnoredNodeSummary = {
   reason: string;
 };
 
+type CoverageIssueSummary = {
+  frameId: string;
+  frameName: string;
+  reason: string;
+};
+
 type FrameCandidate = {
-  node: FrameNode;
+  node: SceneNode;
   bounds: RectData;
 };
 
@@ -63,6 +89,7 @@ type SelectionViewSummary = {
   frameName: string;
   bounds: RectData;
   relativeTopLeft: RelativePoint;
+  primaryTextLabel?: string;
 };
 
 type SelectionPageSummary = {
@@ -80,6 +107,7 @@ type SelectionInfoMessage = {
   isContainer: boolean;
   eligibleFrameCount?: number;
   ignoredNodeCount?: number;
+  coverageIssueCount?: number;
   pages?: SelectionPageSummary[];
   defaultPageNumber?: number;
   defaultViewNumber?: number;
@@ -104,6 +132,7 @@ type SceneNodeWithChildren = SceneNode & ChildrenMixin;
 type ContainerAnalysis = {
   frames: FrameCandidate[];
   ignoredNodes: IgnoredNodeSummary[];
+  coverageIssues: CoverageIssueSummary[];
   groupedPages: FrameCandidate[][];
   selectionPages: SelectionPageSummary[];
 };
@@ -138,6 +167,147 @@ function getNodeExportBounds(node: SceneNode): Rect | null {
   }
 
   return 'absoluteBoundingBox' in node ? node.absoluteBoundingBox : null;
+}
+
+function normalizeTextLabel(text: string, maxLength = 60): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized.length > maxLength
+    ? `${normalized.slice(0, Math.max(maxLength - 1, 1)).trimEnd()}…`
+    : normalized;
+}
+
+function shouldIgnorePrimaryTextLabel(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return IGNORED_PRIMARY_TEXT_LABEL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
+function getTextLabelCandidate(node: SceneNode): TextLabelCandidate | null {
+  if (node.type !== 'TEXT') {
+    return null;
+  }
+
+  const normalizedText = normalizeTextLabel(node.characters);
+  if (!normalizedText || shouldIgnorePrimaryTextLabel(normalizedText)) {
+    return null;
+  }
+
+  const bounds = getNodeExportBounds(node);
+  const area = bounds ? bounds.width * bounds.height : 0;
+
+  return {
+    text: normalizedText,
+    area,
+    y: bounds?.y ?? Number.POSITIVE_INFINITY,
+    x: bounds?.x ?? Number.POSITIVE_INFINITY,
+  };
+}
+
+function pickBetterTextLabelCandidate(
+  current: TextLabelCandidate | null,
+  next: TextLabelCandidate | null,
+): TextLabelCandidate | null {
+  if (!next) {
+    return current;
+  }
+
+  if (!current) {
+    return next;
+  }
+
+  if (next.area !== current.area) {
+    return next.area > current.area ? next : current;
+  }
+
+  if (next.y !== current.y) {
+    return next.y < current.y ? next : current;
+  }
+
+  if (next.x !== current.x) {
+    return next.x < current.x ? next : current;
+  }
+
+  return current;
+}
+
+function findPrimaryTextLabelCandidate(node: SceneNode): TextLabelCandidate | null {
+  let bestCandidate = getTextLabelCandidate(node);
+
+  if ('children' in node) {
+    node.children.forEach((child) => {
+      bestCandidate = pickBetterTextLabelCandidate(bestCandidate, findPrimaryTextLabelCandidate(child as SceneNode));
+    });
+  }
+
+  return bestCandidate;
+}
+
+function findPrimaryTextLabel(node: SceneNode): string | undefined {
+  return findPrimaryTextLabelCandidate(node)?.text;
+}
+
+function getSingleLineText(node: SceneNode): string | null {
+  if (node.type !== 'TEXT') {
+    return null;
+  }
+
+  const lines = node.characters
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length !== 1) {
+    return null;
+  }
+
+  const normalizedText = normalizeTextLabel(lines[0], 80);
+  if (!normalizedText || shouldIgnorePrimaryTextLabel(normalizedText)) {
+    return null;
+  }
+
+  return normalizedText;
+}
+
+function getSingleLinePageTitle(node: SceneNode): string | null {
+  const textCandidates: Array<{ text: string; bounds: RectData | null }> = [];
+
+  function walk(currentNode: SceneNode) {
+    const text = getSingleLineText(currentNode);
+    if (text) {
+      textCandidates.push({
+        text,
+        bounds: toRectData(getNodeExportBounds(currentNode)) ?? null,
+      });
+    }
+
+    if ('children' in currentNode) {
+      currentNode.children.forEach((child) => {
+        walk(child as SceneNode);
+      });
+    }
+  }
+
+  walk(node);
+
+  const orderedTexts = textCandidates
+    .sort((left, right) => {
+      const leftY = left.bounds?.y ?? Number.POSITIVE_INFINITY;
+      const rightY = right.bounds?.y ?? Number.POSITIVE_INFINITY;
+      if (leftY !== rightY) {
+        return leftY - rightY;
+      }
+
+      const leftX = left.bounds?.x ?? Number.POSITIVE_INFINITY;
+      const rightX = right.bounds?.x ?? Number.POSITIVE_INFINITY;
+      return leftX - rightX;
+    })
+    .map((candidate) => candidate.text)
+    .filter((text, index, array) => array.indexOf(text) === index);
+
+  return orderedTexts.length > 0 ? orderedTexts.join(' ') : null;
 }
 
 function parseNode(node: SceneNode): ParsedNode {
@@ -200,42 +370,143 @@ function getSafeFileName(name: string): string {
   return name.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_');
 }
 
+function getNormalizedTextLines(node: SceneNode): string[] {
+  const lines: string[] = [];
+
+  function walk(currentNode: SceneNode) {
+    if (currentNode.type === 'TEXT') {
+      currentNode.characters
+        .split(/\r?\n/)
+        .map((line) => normalizeTextLabel(line, 80))
+        .filter((line) => line.length > 0)
+        .forEach((line) => {
+          lines.push(line);
+        });
+    }
+
+    if ('children' in currentNode) {
+      currentNode.children.forEach((child) => {
+        walk(child as SceneNode);
+      });
+    }
+  }
+
+  walk(node);
+
+  return lines.filter((line, index, items) => items.indexOf(line) === index);
+}
+
+function countDescendants(node: SceneNode): number {
+  if (!('children' in node)) {
+    return 0;
+  }
+
+  return node.children.reduce((sum, child) => {
+    return sum + 1 + countDescendants(child as SceneNode);
+  }, 0);
+}
+
+function countTextNodes(node: SceneNode): number {
+  let count = node.type === 'TEXT' ? 1 : 0;
+
+  if ('children' in node) {
+    node.children.forEach((child) => {
+      count += countTextNodes(child as SceneNode);
+    });
+  }
+
+  return count;
+}
+
+function isLabelLikeNode(node: SceneNode, bounds: RectData, containerBounds: RectData | null): boolean {
+  const textLines = getNormalizedTextLines(node);
+  const descendantCount = countDescendants(node);
+  const textNodeCount = countTextNodes(node);
+  const containerArea = containerBounds ? containerBounds.width * containerBounds.height : 0;
+  const areaRatio = containerArea > 0 ? (bounds.width * bounds.height) / containerArea : 0;
+
+  return textLines.length === 1
+    && textNodeCount > 0
+    && descendantCount <= 24
+    && areaRatio <= 0.015;
+}
+
+function isPageCandidateNode(node: SceneNode, bounds: RectData): boolean {
+  const descendantCount = countDescendants(node);
+  const textNodeCount = countTextNodes(node);
+  const heightToWidthRatio = bounds.width > 0 ? bounds.height / bounds.width : 0;
+
+  if (bounds.height < MIN_PAGE_CANDIDATE_HEIGHT) {
+    return false;
+  }
+
+  if (heightToWidthRatio >= MIN_PAGE_CANDIDATE_HEIGHT_TO_WIDTH_RATIO) {
+    return true;
+  }
+
+  return descendantCount >= MIN_PAGE_CANDIDATE_DESCENDANT_COUNT
+    || textNodeCount >= MIN_PAGE_CANDIDATE_TEXT_NODE_COUNT
+    || node.type === 'FRAME';
+}
+
 function summarizeTopLevelNodes(container: SceneNodeWithChildren): {
   frames: FrameCandidate[];
   ignoredNodes: IgnoredNodeSummary[];
+  pageTitleCandidates: PageTitleCandidate[];
 } {
   const frames: FrameCandidate[] = [];
   const ignoredNodes: IgnoredNodeSummary[] = [];
+  const pageTitleCandidates: PageTitleCandidate[] = [];
+  const containerBounds = toRectData(getNodeExportBounds(container)) ?? null;
 
   for (const child of container.children) {
-    if (child.type !== 'FRAME') {
-      ignoredNodes.push({
-        id: child.id,
-        name: child.name,
-        type: child.type,
-        reason: 'top-level node is not a FRAME',
-      });
-      continue;
-    }
-
     const bounds = toRectData(getNodeExportBounds(child));
+
     if (!bounds) {
       ignoredNodes.push({
         id: child.id,
         name: child.name,
         type: child.type,
-        reason: 'FRAME has no exportable bounds',
+        reason: 'top-level node has no exportable bounds',
+      });
+      continue;
+    }
+
+    if (isLabelLikeNode(child as SceneNode, bounds, containerBounds)) {
+      const pageTitle = getSingleLinePageTitle(child as SceneNode);
+      if (pageTitle) {
+        pageTitleCandidates.push({
+          text: pageTitle,
+          bounds,
+        });
+      } else {
+        ignoredNodes.push({
+          id: child.id,
+          name: child.name,
+          type: child.type,
+          reason: 'top-level node matched LABEL rule but had no usable single-line text',
+        });
+      }
+      continue;
+    }
+
+    if (!isPageCandidateNode(child as SceneNode, bounds)) {
+      ignoredNodes.push({
+        id: child.id,
+        name: child.name,
+        type: child.type,
+        reason: 'top-level node did not meet PAGE/VIEW candidate size or complexity thresholds',
       });
       continue;
     }
 
     frames.push({
-      node: child,
+      node: child as SceneNode,
       bounds,
     });
   }
 
-  return { frames, ignoredNodes };
+  return { frames, ignoredNodes, pageTitleCandidates };
 }
 
 function getHorizontalOverlapRatio(a: RectData, b: RectData): number {
@@ -251,39 +522,176 @@ function getHorizontalOverlapRatio(a: RectData, b: RectData): number {
   return overlapWidth / narrowerWidth;
 }
 
+function getPageBounds(frames: FrameCandidate[]): RectData | null {
+  if (frames.length === 0) {
+    return null;
+  }
+
+  const minX = Math.min(...frames.map((frame) => frame.bounds.x));
+  const minY = Math.min(...frames.map((frame) => frame.bounds.y));
+  const maxX = Math.max(...frames.map((frame) => frame.bounds.x + frame.bounds.width));
+  const maxY = Math.max(...frames.map((frame) => frame.bounds.y + frame.bounds.height));
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+function getPageTitleForBounds(pageBounds: RectData | null, candidates: PageTitleCandidate[]): string | undefined {
+  if (!pageBounds) {
+    return undefined;
+  }
+
+  const matchedCandidate = candidates
+    .map((candidate) => {
+      const verticalGap = pageBounds.y - (candidate.bounds.y + candidate.bounds.height);
+      return {
+        candidate,
+        verticalGap,
+        overlapRatio: getHorizontalOverlapRatio(pageBounds, candidate.bounds),
+      };
+    })
+    .filter(({ verticalGap, overlapRatio }) => {
+      return verticalGap >= 0
+        && verticalGap <= PAGE_TITLE_MAX_VERTICAL_GAP
+        && overlapRatio >= PAGE_OVERLAP_THRESHOLD;
+    })
+    .sort((left, right) => {
+      if (left.candidate.bounds.width !== right.candidate.bounds.width) {
+        return right.candidate.bounds.width - left.candidate.bounds.width;
+      }
+
+      if (left.verticalGap !== right.verticalGap) {
+        return left.verticalGap - right.verticalGap;
+      }
+
+      return right.candidate.bounds.y - left.candidate.bounds.y;
+    })[0];
+
+  return matchedCandidate?.candidate.text;
+}
+
 function groupFramesIntoPages(frames: FrameCandidate[]): FrameCandidate[][] {
   const sortedFrames = frames.slice().sort((left, right) => {
-    if (left.bounds.x !== right.bounds.x) {
-      return left.bounds.x - right.bounds.x;
+    if (left.bounds.y !== right.bounds.y) {
+      return left.bounds.y - right.bounds.y;
     }
 
-    return left.bounds.y - right.bounds.y;
+    return left.bounds.x - right.bounds.x;
   });
 
-  const groupedPages: FrameCandidate[][] = [];
+  const groupedPages: Array<{
+    root: FrameCandidate;
+    frames: FrameCandidate[];
+  }> = [];
 
   for (const frame of sortedFrames) {
-    const matchedPage = groupedPages.find((pageFrames) => {
-      return pageFrames.some((pageFrame) => {
-        return getHorizontalOverlapRatio(frame.bounds, pageFrame.bounds) >= PAGE_OVERLAP_THRESHOLD;
-      });
-    });
+    const matchedPage = groupedPages
+      .map((page) => {
+        const overlapRatio = getHorizontalOverlapRatio(frame.bounds, page.root.bounds);
+        const verticalOffset = frame.bounds.y - page.root.bounds.y;
+        return {
+          page,
+          overlapRatio,
+          verticalOffset,
+        };
+      })
+      .filter(({ overlapRatio, verticalOffset }) => {
+        return overlapRatio >= PAGE_OVERLAP_THRESHOLD && verticalOffset >= 0;
+      })
+      .sort((left, right) => {
+        if (left.verticalOffset !== right.verticalOffset) {
+          return left.verticalOffset - right.verticalOffset;
+        }
+
+        if (left.overlapRatio !== right.overlapRatio) {
+          return right.overlapRatio - left.overlapRatio;
+        }
+
+        return left.page.root.bounds.x - right.page.root.bounds.x;
+      })[0];
 
     if (matchedPage) {
-      matchedPage.push(frame);
+      matchedPage.page.frames.push(frame);
       continue;
     }
 
-    groupedPages.push([frame]);
+    groupedPages.push({
+      root: frame,
+      frames: [frame],
+    });
   }
 
   groupedPages.sort((left, right) => {
+    if (left.root.bounds.x !== right.root.bounds.x) {
+      return left.root.bounds.x - right.root.bounds.x;
+    }
+
+    return left.root.bounds.y - right.root.bounds.y;
+  });
+
+  groupedPages.forEach((page) => {
+    page.frames.sort((left, right) => {
+      if (left.bounds.y !== right.bounds.y) {
+        return left.bounds.y - right.bounds.y;
+      }
+
+      return left.bounds.x - right.bounds.x;
+    });
+  });
+
+  return groupedPages.map((page) => page.frames);
+}
+
+function auditGroupedPages(
+  frames: FrameCandidate[],
+  groupedPages: FrameCandidate[][],
+): {
+  groupedPages: FrameCandidate[][];
+  coverageIssues: CoverageIssueSummary[];
+} {
+  const frameCountMap = new Map<string, number>();
+  groupedPages.forEach((pageFrames) => {
+    pageFrames.forEach((frame) => {
+      frameCountMap.set(frame.node.id, (frameCountMap.get(frame.node.id) || 0) + 1);
+    });
+  });
+
+  const normalizedGroups = groupedPages.map((pageFrames) => pageFrames.slice());
+  const coverageIssues: CoverageIssueSummary[] = [];
+
+  frames.forEach((frame) => {
+    const groupedCount = frameCountMap.get(frame.node.id) || 0;
+
+    if (groupedCount === 0) {
+      normalizedGroups.push([frame]);
+      coverageIssues.push({
+        frameId: frame.node.id,
+        frameName: frame.node.name,
+        reason: 'top-level FRAME was not assigned to any PAGE/VIEW group and was exported as a standalone page',
+      });
+      return;
+    }
+
+    if (groupedCount > 1) {
+      coverageIssues.push({
+        frameId: frame.node.id,
+        frameName: frame.node.name,
+        reason: 'top-level FRAME was assigned to multiple PAGE/VIEW groups',
+      });
+    }
+  });
+
+  normalizedGroups.sort((left, right) => {
     const leftX = Math.min(...left.map((frame) => frame.bounds.x));
     const rightX = Math.min(...right.map((frame) => frame.bounds.x));
     return leftX - rightX;
   });
 
-  groupedPages.forEach((pageFrames) => {
+  normalizedGroups.forEach((pageFrames) => {
     pageFrames.sort((left, right) => {
       if (left.bounds.y !== right.bounds.y) {
         return left.bounds.y - right.bounds.y;
@@ -293,7 +701,10 @@ function groupFramesIntoPages(frames: FrameCandidate[]): FrameCandidate[][] {
     });
   });
 
-  return groupedPages;
+  return {
+    groupedPages: normalizedGroups,
+    coverageIssues,
+  };
 }
 
 function roundToTwoDecimals(value: number): number {
@@ -325,11 +736,14 @@ function getRelativeTopLeftMap(frames: FrameCandidate[]): Map<string, RelativePo
 
 function analyzeContainer(container: SceneNodeWithChildren): ContainerAnalysis {
   const summary = summarizeTopLevelNodes(container);
-  const groupedPages = groupFramesIntoPages(summary.frames);
+  const groupedPageResult = auditGroupedPages(summary.frames, groupFramesIntoPages(summary.frames));
+  const groupedPages = groupedPageResult.groupedPages;
   const relativeTopLeftMap = getRelativeTopLeftMap(summary.frames);
   const selectionPages = groupedPages.map((pageFrames, pageIndex) => ({
     pageNumber: pageIndex + 1,
-    pageLabel: pageFrames[0]?.node.name || `Page${String(pageIndex + 1)}`,
+    pageLabel: getPageTitleForBounds(getPageBounds(pageFrames), summary.pageTitleCandidates)
+      || pageFrames[0]?.node.name
+      || `Page${String(pageIndex + 1)}`,
     frameNames: Array.from(new Set(pageFrames.map((frame) => frame.node.name))),
     viewCount: pageFrames.length,
     views: pageFrames.map((frame, viewIndex) => ({
@@ -338,22 +752,17 @@ function analyzeContainer(container: SceneNodeWithChildren): ContainerAnalysis {
       frameName: frame.node.name,
       bounds: frame.bounds,
       relativeTopLeft: relativeTopLeftMap.get(frame.node.id) || { x: 0, y: 0 },
+      primaryTextLabel: findPrimaryTextLabel(frame.node),
     })),
   }));
 
   return {
     frames: summary.frames,
     ignoredNodes: summary.ignoredNodes,
+    coverageIssues: groupedPageResult.coverageIssues,
     groupedPages,
     selectionPages,
   };
-}
-
-async function exportFramePng(frame: FrameNode, scale: number): Promise<Uint8Array> {
-  return frame.exportAsync({
-    format: 'PNG',
-    constraint: { type: 'SCALE', value: scale },
-  });
 }
 
 function buildSelectionInfoMessage(): SelectionInfoMessage {
@@ -387,6 +796,7 @@ function buildSelectionInfoMessage(): SelectionInfoMessage {
     isContainer: true,
     eligibleFrameCount: analysis.frames.length,
     ignoredNodeCount: analysis.ignoredNodes.length,
+    coverageIssueCount: analysis.coverageIssues.length,
     pages: analysis.selectionPages,
     defaultPageNumber: analysis.selectionPages[0]?.pageNumber,
     defaultViewNumber: analysis.selectionPages[0]?.views[0]?.viewNumber,

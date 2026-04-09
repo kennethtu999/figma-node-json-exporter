@@ -142,6 +142,15 @@
         color: #6b573f;
       }
 
+      .view-primary-text {
+        margin-bottom: 6px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(234, 218, 194, 0.45);
+        color: #5f4b39;
+        line-height: 1.5;
+      }
+
       .view-coords {
         color: #7a6650;
       }
@@ -298,6 +307,7 @@
       const pagesListContent = document.getElementById('pages-list-content');
       const exportModeInputs = Array.from(document.querySelectorAll('input[name="export-mode"]'));
       let currentPages = [];
+      let pageGroupSequence = 0;
 
       const crcTable = (() => {
         const table = new Uint32Array(256);
@@ -572,6 +582,189 @@
         return createPageName(pageNumber) + '-View' + String(viewNumber);
       }
 
+      function createPageGroupId() {
+        pageGroupSequence += 1;
+        return 'group-' + String(pageGroupSequence);
+      }
+
+      function uniqueStrings(values) {
+        const unique = [];
+        const seen = new Set();
+
+        values.forEach((value) => {
+          if (typeof value !== 'string' || value.length === 0 || seen.has(value)) {
+            return;
+          }
+
+          seen.add(value);
+          unique.push(value);
+        });
+
+        return unique;
+      }
+
+      function syncPageGroup(page, fallbackLabel) {
+        page.frameNames = uniqueStrings(page.views.map((view) => view.frameName));
+        page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
+        page.pageLabel = page.views[0]?.frameName || fallbackLabel || page.pageLabel || '';
+        page.groupId = page.groupId || createPageGroupId();
+        return page;
+      }
+
+      function renumberViewsInPage(page) {
+        page.views.forEach((view, viewIndex) => {
+          view.viewNumber = viewIndex + 1;
+        });
+        syncPageGroup(page, page.pageLabel || page.views[0]?.frameName || '');
+      }
+
+      function createPageGroupFromViews(views, pageLabel) {
+        return syncPageGroup({
+          groupId: createPageGroupId(),
+          pageNumber: 0,
+          pageLabel: pageLabel || '',
+          frameNames: [],
+          viewCount: 0,
+          views,
+        }, pageLabel || '');
+      }
+
+      function renumberPageGroups(pages, startIndex) {
+        const safeStartIndex = Math.max(0, Math.min(
+          typeof startIndex === 'number' ? startIndex : 0,
+          Math.max(pages.length - 1, 0),
+        ));
+
+        pages.forEach((page, pageIndex) => {
+          if (pageIndex < safeStartIndex && Number.isInteger(page.pageNumber) && page.pageNumber > 0) {
+            page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
+            return;
+          }
+
+          page.pageNumber = pageIndex + 1;
+          page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
+        });
+      }
+
+      function cloneSelectionPages(pages) {
+        if (!Array.isArray(pages)) {
+          return [];
+        }
+
+        const clonedPages = pages.map((page, pageIndex) => {
+          const views = Array.isArray(page?.views)
+            ? page.views.map((view, viewIndex) => ({
+              viewNumber: normalizeInteger(view?.viewNumber, viewIndex + 1),
+              frameId: typeof view?.frameId === 'string' ? view.frameId : '',
+              frameName: typeof view?.frameName === 'string' ? view.frameName : '',
+              bounds: view?.bounds || {},
+              relativeTopLeft: view?.relativeTopLeft || { x: 0, y: 0 },
+              primaryTextLabel: typeof view?.primaryTextLabel === 'string' ? view.primaryTextLabel : '',
+            }))
+            : [];
+          const frameNames = Array.isArray(page?.frameNames) && page.frameNames.length
+            ? uniqueStrings(page.frameNames)
+            : uniqueStrings(views.map((view) => view.frameName));
+          return syncPageGroup({
+            groupId: createPageGroupId(),
+            pageNumber: pageIndex + 1,
+            pageLabel: typeof page?.pageLabel === 'string' ? page.pageLabel : '',
+            frameNames,
+            viewCount: views.length,
+            views,
+          }, typeof page?.pageLabel === 'string' ? page.pageLabel : '');
+        });
+
+        renumberPageGroups(clonedPages);
+        return clonedPages;
+      }
+
+      function findViewByFrameId(frameId) {
+        for (const page of currentPages) {
+          const matchedView = page.views.find((view) => view.frameId === frameId);
+          if (matchedView) {
+            return matchedView;
+          }
+        }
+
+        return null;
+      }
+
+      function findViewLocation(frameId) {
+        for (let pageIndex = 0; pageIndex < currentPages.length; pageIndex += 1) {
+          const viewIndex = currentPages[pageIndex].views.findIndex((view) => view.frameId === frameId);
+          if (viewIndex >= 0) {
+            return {
+              pageIndex,
+              viewIndex,
+              page: currentPages[pageIndex],
+              view: currentPages[pageIndex].views[viewIndex],
+            };
+          }
+        }
+
+        return null;
+      }
+
+      function relocateViewByPageNumber(frameId, rawPageNumber) {
+        const location = findViewLocation(frameId);
+        if (!location) {
+          return;
+        }
+
+        const currentPageNumber = location.page.pageNumber;
+        const targetPageNumber = normalizeInteger(rawPageNumber, currentPageNumber);
+        if (targetPageNumber === currentPageNumber) {
+          renderPagesList();
+          return;
+        }
+
+        const fallbackLabel = location.page.pageLabel || location.page.views[0]?.frameName || '';
+        const [movedView] = location.page.views.splice(location.viewIndex, 1);
+        const pageRemoved = location.page.views.length === 0;
+
+        if (pageRemoved) {
+          currentPages.splice(location.pageIndex, 1);
+        } else {
+          renumberViewsInPage(location.page);
+        }
+
+        if (targetPageNumber < currentPageNumber) {
+          const targetIndex = Math.max(0, Math.min(currentPages.length - 1, targetPageNumber - 1));
+          const targetPage = currentPages[targetIndex];
+          if (!targetPage) {
+            return;
+          }
+
+          targetPage.views.push(movedView);
+          renumberViewsInPage(targetPage);
+
+          if (pageRemoved) {
+            renumberPageGroups(currentPages, location.pageIndex);
+          }
+        } else {
+          const standalonePage = createPageGroupFromViews([movedView], movedView.frameName || fallbackLabel);
+          renumberViewsInPage(standalonePage);
+
+          const insertIndex = Math.max(0, Math.min(currentPages.length, targetPageNumber - 1));
+          currentPages.splice(insertIndex, 0, standalonePage);
+          renumberPageGroups(currentPages, insertIndex);
+        }
+
+        renderPagesList();
+        updatePickerSummary();
+      }
+
+      function updateViewNumber(frameId, rawValue) {
+        const view = findViewByFrameId(frameId);
+        if (!view) {
+          return;
+        }
+
+        view.viewNumber = normalizeInteger(rawValue, view.viewNumber);
+        renderPagesList();
+      }
+
       function createPagedIndexHtml(payload, manifestPages, totalViewCount) {
         const pageSections = manifestPages.map((page) => {
           const viewsHtml = page.views.map((view) => {
@@ -740,6 +933,9 @@
             .map((view) => {
               const relativeX = formatRelativeValue(view.relativeTopLeft?.x);
               const relativeY = formatRelativeValue(view.relativeTopLeft?.y);
+              const primaryTextLabel = typeof view.primaryTextLabel === 'string' && view.primaryTextLabel.length > 0
+                ? '<div class="view-primary-text">' + escapeHtml(view.primaryTextLabel) + '</div>'
+                : '';
 
               return ''
                 + '<div class="view-card" data-frame-id="' + escapeHtml(view.frameId) + '">'
@@ -747,6 +943,7 @@
                 + '<strong>' + escapeHtml(createViewName(page.pageNumber, view.viewNumber)) + '</strong>'
                 + '<span class="view-name">' + escapeHtml(view.frameName) + '</span>'
                 + '</div>'
+                + primaryTextLabel
                 + '<div class="view-coords">左上相對座標 x=' + relativeX + ', y=' + relativeY + '</div>'
                 + '<div class="view-controls">'
                 + '<label><span>Page Number</span><input class="page-override-input" type="number" min="1" step="1" value="' + String(page.pageNumber) + '" /></label>'
@@ -788,38 +985,55 @@
           return [];
         }
 
-        const rows = Array.from(pagesListContent.querySelectorAll('[data-frame-id]'));
         const seen = new Set();
 
-        return rows.map((row) => {
-          const frameId = row.getAttribute('data-frame-id') || '';
-          const pageNumberInput = row.querySelector('.page-override-input');
-          const viewNumberInput = row.querySelector('.view-override-input');
-          const pageNumber = normalizeInteger(pageNumberInput?.value, 1);
-          const viewNumber = normalizeInteger(viewNumberInput?.value, 1);
-          const duplicateKey = String(pageNumber) + ':' + String(viewNumber);
+        return currentPages.flatMap((page) => {
+          return page.views.map((view) => {
+            const pageNumber = normalizeInteger(page.pageNumber, 1);
+            const viewNumber = normalizeInteger(view.viewNumber, 1);
+            const duplicateKey = String(pageNumber) + ':' + String(viewNumber);
 
-          if (seen.has(duplicateKey)) {
-            throw new Error(`Page${String(pageNumber)} / View${String(viewNumber)} 重複，請調整編號。`);
-          }
+            if (seen.has(duplicateKey)) {
+              throw new Error(`Page${String(pageNumber)} / View${String(viewNumber)} 重複，請調整編號。`);
+            }
 
-          seen.add(duplicateKey);
+            seen.add(duplicateKey);
 
-          if (pageNumberInput) {
-            pageNumberInput.value = String(pageNumber);
-          }
-
-          if (viewNumberInput) {
-            viewNumberInput.value = String(viewNumber);
-          }
-
-          return {
-            frameId,
-            pageNumber,
-            viewNumber,
-          };
+            return {
+              frameId: view.frameId,
+              pageNumber,
+              viewNumber,
+            };
+          });
         });
       }
+
+      pagesListContent.addEventListener('change', (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) {
+          return;
+        }
+
+        const row = target.closest('[data-frame-id]');
+        const frameId = row?.getAttribute('data-frame-id') || '';
+        if (!frameId) {
+          return;
+        }
+
+        if (target.classList.contains('page-override-input')) {
+          const location = findViewLocation(frameId);
+          const nextPageNumber = normalizeInteger(target.value, location?.page?.pageNumber || 1);
+          target.value = String(nextPageNumber);
+          relocateViewByPageNumber(frameId, nextPageNumber);
+        }
+
+        if (target.classList.contains('view-override-input')) {
+          const view = findViewByFrameId(frameId);
+          const nextViewNumber = normalizeInteger(target.value, view?.viewNumber || 1);
+          target.value = String(nextViewNumber);
+          updateViewNumber(frameId, nextViewNumber);
+        }
+      });
 
       async function buildViewBundle(viewPayload) {
         const sourcePngBytes = new Uint8Array(viewPayload.pngBytes);
@@ -1091,11 +1305,15 @@
             renderPagesList();
             updatePickerSummary();
           } else {
+            const coverageNotice = Number(msg.coverageIssueCount || 0) > 0
+              ? '，另外偵測到 ' + String(msg.coverageIssueCount || 0) + ' 個第一層 FRAME 分組異常，已自動補成獨立頁面或標記檢查。'
+              : '';
             selectionInfo.textContent =
               '目前選取：' + msg.firstSelectionName
               + '。第一層會匯出 ' + String(msg.eligibleFrameCount || 0) + ' 個 FRAME'
-              + '，忽略 ' + String(msg.ignoredNodeCount || 0) + ' 個非頁面節點。';
-            currentPages = Array.isArray(msg.pages) ? msg.pages : [];
+              + '，忽略 ' + String(msg.ignoredNodeCount || 0) + ' 個非頁面節點。'
+              + coverageNotice;
+            currentPages = cloneSelectionPages(msg.pages);
             renderPagesList();
             updatePickerSummary();
           }
