@@ -73,7 +73,7 @@ type ExportViewPayload = {
   bounds: RectData;
   relativeTopLeft: RelativePoint;
   structureJson: ParsedNode;
-  pngBytes: number[];
+  pngBytes: Uint8Array;
 };
 
 type ExportPagePayload = {
@@ -113,18 +113,37 @@ type SelectionInfoMessage = {
   defaultViewNumber?: number;
 };
 
-type PrepareZipDataMessage = {
-  type: 'prepare-zip-data';
+type ExportMode = 'paged' | 'all-in-one';
+
+type PrepareZipStartMessage = {
+  type: 'prepare-zip-start';
+  exportMode: ExportMode;
   containerId: string;
   containerName: string;
-  containerStructureJson: ParsedNode;
-  containerPngBytes: number[];
-  pages: ExportPagePayload[];
   ignoredNodes: {
     count: number;
     items: IgnoredNodeSummary[];
   };
   fileName: string;
+  totalPages: number;
+};
+
+type PrepareZipPageMessage = {
+  type: 'prepare-zip-page';
+  exportMode: 'paged';
+  page: ExportPagePayload;
+  pageIndex: number;
+  totalPages: number;
+};
+
+type PrepareZipCompleteMessage = {
+  type: 'prepare-zip-complete';
+  exportMode: ExportMode;
+  containerId: string;
+  containerName: string;
+  containerStructureJson?: ParsedNode;
+  containerPngBytes?: Uint8Array;
+  pages?: ExportPagePayload[];
 };
 
 type SceneNodeWithChildren = SceneNode & ChildrenMixin;
@@ -138,6 +157,7 @@ type ContainerAnalysis = {
 };
 
 type PrepareZipSelection = {
+  exportMode?: ExportMode;
   overrides?: Array<{
     frameId: string;
     pageNumber: number;
@@ -837,95 +857,174 @@ async function exportNodePng(node: SceneNode, scale: number): Promise<Uint8Array
   }
 }
 
+type AssignedView = {
+  pageNumber: number;
+  viewNumber: number;
+  pageLabel: string;
+  frameNames: string[];
+  view: SelectionViewSummary;
+  frame: FrameCandidate;
+};
+
+type AssignedPage = {
+  pageNumber: number;
+  pageLabel: string;
+  frameNames: string[];
+  views: AssignedView[];
+};
+
+function collectAssignedPages(analysis: ContainerAnalysis): AssignedPage[] {
+  const frameLookup = new Map<string, FrameCandidate>();
+  analysis.frames.forEach((frame) => {
+    frameLookup.set(frame.node.id, frame);
+  });
+
+  const overrideMap = new Map<string, { pageNumber: number; viewNumber: number }>();
+  (lastPrepareZipRequest.overrides || []).forEach((override) => {
+    if (!Number.isInteger(override.pageNumber) || override.pageNumber <= 0) {
+      throw new Error(`View ${override.frameId} 的 Page Number 必須是大於 0 的整數。`);
+    }
+
+    if (!Number.isInteger(override.viewNumber) || override.viewNumber <= 0) {
+      throw new Error(`View ${override.frameId} 的 View Number 必須是大於 0 的整數。`);
+    }
+
+    overrideMap.set(override.frameId, {
+      pageNumber: override.pageNumber,
+      viewNumber: override.viewNumber,
+    });
+  });
+
+  const duplicateCheck = new Set<string>();
+  const assignedViews = analysis.selectionPages.flatMap((page) => {
+    return page.views.map((view) => {
+      const override = overrideMap.get(view.frameId);
+      const assignedPageNumber = override?.pageNumber ?? page.pageNumber;
+      const assignedViewNumber = override?.viewNumber ?? view.viewNumber;
+      const duplicateKey = `${String(assignedPageNumber)}:${String(assignedViewNumber)}`;
+
+      if (duplicateCheck.has(duplicateKey)) {
+        throw new Error(`Page${String(assignedPageNumber)} / View${String(assignedViewNumber)} 重複，請調整編號。`);
+      }
+
+      duplicateCheck.add(duplicateKey);
+
+      const frame = frameLookup.get(view.frameId);
+      if (!frame) {
+        throw new Error(`找不到對應的 FRAME：${view.frameId}`);
+      }
+
+      return {
+        pageNumber: assignedPageNumber,
+        viewNumber: assignedViewNumber,
+        pageLabel: page.pageLabel,
+        frameNames: page.frameNames,
+        view,
+        frame,
+      };
+    });
+  }).sort((left, right) => {
+    if (left.pageNumber !== right.pageNumber) {
+      return left.pageNumber - right.pageNumber;
+    }
+
+    return left.viewNumber - right.viewNumber;
+  });
+
+  const groupedPages = new Map<number, AssignedView[]>();
+  assignedViews.forEach((assignedView) => {
+    const pageViews = groupedPages.get(assignedView.pageNumber);
+    if (pageViews) {
+      pageViews.push(assignedView);
+    } else {
+      groupedPages.set(assignedView.pageNumber, [assignedView]);
+    }
+  });
+
+  return Array.from(groupedPages.keys())
+    .sort((left, right) => left - right)
+    .map((pageNumber) => {
+      const pageViews = groupedPages.get(pageNumber) || [];
+      return {
+        pageNumber,
+        pageLabel: pageViews[0]?.pageLabel || pageViews[0]?.view.frameName || `Page${String(pageNumber)}`,
+        frameNames: Array.from(new Set(pageViews.flatMap((pageView) => pageView.frameNames))),
+        views: pageViews,
+      };
+    });
+}
+
 async function handlePrepareZipRequest() {
   const container = getSelectedContainerOrThrow();
 
   try {
+    const exportMode = lastPrepareZipRequest.exportMode || 'paged';
     figma.notify('正在準備 AI ZIP...');
-    figma.ui.postMessage({ type: 'set-loading', isLoading: true });
+    figma.ui.postMessage({
+      type: 'set-loading',
+      isLoading: true,
+      message: exportMode === 'all-in-one' ? '正在準備 All in one 原始資料...' : '正在分析 Page/View 並串流資料...',
+    });
 
     const analysis = analyzeContainer(container);
     if (analysis.frames.length === 0) {
       throw new Error('選取的容器第一層沒有可匯出的 FRAME。');
     }
 
-    const containerStructureJson = parseNode(container);
-    const containerPngBytes = await exportNodePng(container, 1);
+    const assignedPages = collectAssignedPages(analysis);
+    const startMessage: PrepareZipStartMessage = {
+      type: 'prepare-zip-start',
+      exportMode,
+      containerId: container.id,
+      containerName: container.name,
+      ignoredNodes: {
+        count: analysis.ignoredNodes.length,
+        items: analysis.ignoredNodes,
+      },
+      fileName: getSafeFileName(container.name),
+      totalPages: assignedPages.length,
+    };
 
-    const frameLookup = new Map<string, FrameCandidate>();
-    analysis.frames.forEach((frame) => {
-      frameLookup.set(frame.node.id, frame);
-    });
+    figma.ui.postMessage(startMessage);
 
-    const overrideMap = new Map<string, { pageNumber: number; viewNumber: number }>();
-    (lastPrepareZipRequest.overrides || []).forEach((override) => {
-      if (!Number.isInteger(override.pageNumber) || override.pageNumber <= 0) {
-        throw new Error(`View ${override.frameId} 的 Page Number 必須是大於 0 的整數。`);
-      }
-
-      if (!Number.isInteger(override.viewNumber) || override.viewNumber <= 0) {
-        throw new Error(`View ${override.frameId} 的 View Number 必須是大於 0 的整數。`);
-      }
-
-      overrideMap.set(override.frameId, {
-        pageNumber: override.pageNumber,
-        viewNumber: override.viewNumber,
-      });
-    });
-
-    const duplicateCheck = new Set<string>();
-    const assignedViews = analysis.selectionPages.flatMap((page) => {
-      return page.views.map((view) => {
-        const override = overrideMap.get(view.frameId);
-        const assignedPageNumber = override?.pageNumber ?? page.pageNumber;
-        const assignedViewNumber = override?.viewNumber ?? view.viewNumber;
-        const duplicateKey = `${String(assignedPageNumber)}:${String(assignedViewNumber)}`;
-
-        if (duplicateCheck.has(duplicateKey)) {
-          throw new Error(`Page${String(assignedPageNumber)} / View${String(assignedViewNumber)} 重複，請調整編號。`);
-        }
-
-        duplicateCheck.add(duplicateKey);
-
-        return {
-          pageNumber: assignedPageNumber,
-          viewNumber: assignedViewNumber,
+    if (exportMode === 'all-in-one') {
+      const completeMessage: PrepareZipCompleteMessage = {
+        type: 'prepare-zip-complete',
+        exportMode,
+        containerId: container.id,
+        containerName: container.name,
+        containerStructureJson: parseNode(container),
+        containerPngBytes: await exportNodePng(container, 1),
+        pages: assignedPages.map((page) => ({
+          pageNumber: page.pageNumber,
           pageLabel: page.pageLabel,
           frameNames: page.frameNames,
-          view,
-          frame: frameLookup.get(view.frameId),
-        };
+          views: page.views.map((assignedView) => ({
+            viewNumber: assignedView.viewNumber,
+            frameId: assignedView.frame.node.id,
+            frameName: assignedView.frame.node.name,
+            bounds: assignedView.frame.bounds,
+            relativeTopLeft: assignedView.view.relativeTopLeft,
+            structureJson: parseNode(assignedView.frame.node),
+            pngBytes: new Uint8Array(0),
+          })),
+        })),
+      };
+
+      figma.ui.postMessage(completeMessage);
+      return;
+    }
+
+    for (let pageIndex = 0; pageIndex < assignedPages.length; pageIndex += 1) {
+      const assignedPage = assignedPages[pageIndex];
+      figma.ui.postMessage({
+        type: 'set-loading',
+        isLoading: true,
+        message: `正在準備 Page${String(assignedPage.pageNumber)}（${String(pageIndex + 1)}/${String(assignedPages.length)}）...`,
       });
-    }).sort((left, right) => {
-      if (left.pageNumber !== right.pageNumber) {
-        return left.pageNumber - right.pageNumber;
-      }
 
-      return left.viewNumber - right.viewNumber;
-    });
-
-    const groupedPages = new Map<number, typeof assignedViews>();
-    assignedViews.forEach((assignedView) => {
-      const pageViews = groupedPages.get(assignedView.pageNumber);
-      if (pageViews) {
-        pageViews.push(assignedView);
-      } else {
-        groupedPages.set(assignedView.pageNumber, [assignedView]);
-      }
-    });
-
-    const pages: ExportPagePayload[] = [];
-    for (const pageNumber of Array.from(groupedPages.keys()).sort((left, right) => left - right)) {
-      const pageViews = groupedPages.get(pageNumber) || [];
       const views: ExportViewPayload[] = [];
-
-      for (const assignedView of pageViews) {
-        if (!assignedView.frame) {
-          throw new Error(`找不到對應的 FRAME：${assignedView.view.frameId}`);
-        }
-
-        const pngBytes = await exportNodePng(assignedView.frame.node, 1);
-
+      for (const assignedView of assignedPage.views) {
         views.push({
           viewNumber: assignedView.viewNumber,
           frameId: assignedView.frame.node.id,
@@ -933,33 +1032,34 @@ async function handlePrepareZipRequest() {
           bounds: assignedView.frame.bounds,
           relativeTopLeft: assignedView.view.relativeTopLeft,
           structureJson: parseNode(assignedView.frame.node),
-          pngBytes: Array.from(pngBytes),
+          pngBytes: await exportNodePng(assignedView.frame.node, 1),
         });
       }
 
-      pages.push({
-        pageNumber,
-        pageLabel: pageViews[0]?.pageLabel || pageViews[0]?.view.frameName || `Page${String(pageNumber)}`,
-        frameNames: Array.from(new Set(pageViews.flatMap((pageView) => pageView.frameNames))),
-        views,
-      });
+      const pageMessage: PrepareZipPageMessage = {
+        type: 'prepare-zip-page',
+        exportMode: 'paged',
+        page: {
+          pageNumber: assignedPage.pageNumber,
+          pageLabel: assignedPage.pageLabel,
+          frameNames: assignedPage.frameNames,
+          views,
+        },
+        pageIndex: pageIndex + 1,
+        totalPages: assignedPages.length,
+      };
+
+      figma.ui.postMessage(pageMessage);
     }
 
-    const message: PrepareZipDataMessage = {
-      type: 'prepare-zip-data',
+    const completeMessage: PrepareZipCompleteMessage = {
+      type: 'prepare-zip-complete',
+      exportMode,
       containerId: container.id,
       containerName: container.name,
-      containerStructureJson,
-      containerPngBytes: Array.from(containerPngBytes),
-      pages,
-      ignoredNodes: {
-        count: analysis.ignoredNodes.length,
-        items: analysis.ignoredNodes,
-      },
-      fileName: getSafeFileName(container.name),
     };
 
-    figma.ui.postMessage(message);
+    figma.ui.postMessage(completeMessage);
   } catch (error) {
     console.error(error);
     const message = error instanceof Error ? error.message : '準備 AI ZIP 時發生錯誤。';
@@ -984,7 +1084,9 @@ figma.on('selectionchange', () => {
 figma.ui.onmessage = (msg) => {
   if (msg.type === 'prepare-zip') {
     const rawOverrides = Array.isArray(msg.overrides) ? msg.overrides as Array<Record<string, unknown>> : [];
+    const rawExportMode = msg.exportMode === 'all-in-one' ? 'all-in-one' : 'paged';
     lastPrepareZipRequest = {
+      exportMode: rawExportMode,
       overrides: rawOverrides
           .filter((override) => typeof override.frameId === 'string')
           .map((override) => ({

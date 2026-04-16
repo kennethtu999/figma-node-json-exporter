@@ -387,71 +387,106 @@
         view.setUint32(offset, value >>> 0, true);
       }
 
-      function createZip(entries) {
+      function createZipBuilder() {
+        const localChunks = [];
+        const centralEntries = [];
         let localSize = 0;
-        let centralSize = 0;
 
-        entries.forEach((entry) => {
-          localSize += 30 + entry.nameBytes.length + entry.data.length;
-          centralSize += 46 + entry.nameBytes.length;
-        });
+        function addEntry(path, data) {
+          const nameBytes = encodeText(path);
+          const payload = data instanceof Uint8Array ? data : new Uint8Array(data);
+          const crc = crc32(payload);
+          const localHeader = new Uint8Array(30 + nameBytes.length);
+          const localView = new DataView(localHeader.buffer);
 
-        const totalSize = localSize + centralSize + 22;
-        const output = new Uint8Array(totalSize);
-        const view = new DataView(output.buffer);
-        let offset = 0;
-        let centralOffset = localSize;
+          writeUint32(localView, 0, 0x04034b50);
+          writeUint16(localView, 4, 20);
+          writeUint16(localView, 6, 0);
+          writeUint16(localView, 8, 0);
+          writeUint16(localView, 10, 0);
+          writeUint16(localView, 12, 0);
+          writeUint32(localView, 14, crc);
+          writeUint32(localView, 18, payload.length);
+          writeUint32(localView, 22, payload.length);
+          writeUint16(localView, 26, nameBytes.length);
+          writeUint16(localView, 28, 0);
+          localHeader.set(nameBytes, 30);
 
-        entries.forEach((entry) => {
-          entry.localHeaderOffset = offset;
-          writeUint32(view, offset, 0x04034b50);
-          writeUint16(view, offset + 4, 20);
-          writeUint16(view, offset + 6, 0);
-          writeUint16(view, offset + 8, 0);
-          writeUint16(view, offset + 10, 0);
-          writeUint16(view, offset + 12, 0);
-          writeUint32(view, offset + 14, entry.crc);
-          writeUint32(view, offset + 18, entry.data.length);
-          writeUint32(view, offset + 22, entry.data.length);
-          writeUint16(view, offset + 26, entry.nameBytes.length);
-          writeUint16(view, offset + 28, 0);
-          output.set(entry.nameBytes, offset + 30);
-          output.set(entry.data, offset + 30 + entry.nameBytes.length);
-          offset += 30 + entry.nameBytes.length + entry.data.length;
-        });
+          localChunks.push(localHeader, payload);
+          centralEntries.push({
+            nameBytes,
+            crc,
+            size: payload.length,
+            localHeaderOffset: localSize,
+          });
+          localSize += localHeader.length + payload.length;
+        }
 
-        entries.forEach((entry) => {
-          writeUint32(view, centralOffset, 0x02014b50);
-          writeUint16(view, centralOffset + 4, 20);
-          writeUint16(view, centralOffset + 6, 20);
-          writeUint16(view, centralOffset + 8, 0);
-          writeUint16(view, centralOffset + 10, 0);
-          writeUint16(view, centralOffset + 12, 0);
-          writeUint16(view, centralOffset + 14, 0);
-          writeUint32(view, centralOffset + 16, entry.crc);
-          writeUint32(view, centralOffset + 20, entry.data.length);
-          writeUint32(view, centralOffset + 24, entry.data.length);
-          writeUint16(view, centralOffset + 28, entry.nameBytes.length);
-          writeUint16(view, centralOffset + 30, 0);
-          writeUint16(view, centralOffset + 32, 0);
-          writeUint16(view, centralOffset + 34, 0);
-          writeUint16(view, centralOffset + 36, 0);
-          writeUint32(view, centralOffset + 38, 0);
-          writeUint32(view, centralOffset + 42, entry.localHeaderOffset);
-          output.set(entry.nameBytes, centralOffset + 46);
-          centralOffset += 46 + entry.nameBytes.length;
-        });
+        function buildBlob() {
+          const centralChunks = [];
+          let centralSize = 0;
 
-        writeUint32(view, centralOffset, 0x06054b50);
-        writeUint16(view, centralOffset + 4, 0);
-        writeUint16(view, centralOffset + 6, 0);
-        writeUint16(view, centralOffset + 8, entries.length);
-        writeUint16(view, centralOffset + 10, entries.length);
-        writeUint32(view, centralOffset + 12, centralSize);
-        writeUint32(view, centralOffset + 16, localSize);
-        writeUint16(view, centralOffset + 20, 0);
+          centralEntries.forEach((entry) => {
+            const centralHeader = new Uint8Array(46 + entry.nameBytes.length);
+            const centralView = new DataView(centralHeader.buffer);
 
-        return new Blob([output], { type: 'application/zip' });
+            writeUint32(centralView, 0, 0x02014b50);
+            writeUint16(centralView, 4, 20);
+            writeUint16(centralView, 6, 20);
+            writeUint16(centralView, 8, 0);
+            writeUint16(centralView, 10, 0);
+            writeUint16(centralView, 12, 0);
+            writeUint16(centralView, 14, 0);
+            writeUint32(centralView, 16, entry.crc);
+            writeUint32(centralView, 20, entry.size);
+            writeUint32(centralView, 24, entry.size);
+            writeUint16(centralView, 28, entry.nameBytes.length);
+            writeUint16(centralView, 30, 0);
+            writeUint16(centralView, 32, 0);
+            writeUint16(centralView, 34, 0);
+            writeUint16(centralView, 36, 0);
+            writeUint32(centralView, 38, 0);
+            writeUint32(centralView, 42, entry.localHeaderOffset);
+            centralHeader.set(entry.nameBytes, 46);
+
+            centralChunks.push(centralHeader);
+            centralSize += centralHeader.length;
+          });
+
+          const endRecord = new Uint8Array(22);
+          const endView = new DataView(endRecord.buffer);
+          writeUint32(endView, 0, 0x06054b50);
+          writeUint16(endView, 4, 0);
+          writeUint16(endView, 6, 0);
+          writeUint16(endView, 8, centralEntries.length);
+          writeUint16(endView, 10, centralEntries.length);
+          writeUint32(endView, 12, centralSize);
+          writeUint32(endView, 16, localSize);
+          writeUint16(endView, 20, 0);
+
+          return new Blob(localChunks.concat(centralChunks, [endRecord]), { type: 'application/zip' });
+        }
+
+        return {
+          addEntry,
+          buildBlob,
+        };
+      }
+
+      function toUint8Array(value) {
+        if (value instanceof Uint8Array) {
+          return value;
+        }
+
+        if (value instanceof ArrayBuffer) {
+          return new Uint8Array(value);
+        }
+
+        if (Array.isArray(value)) {
+          return new Uint8Array(value);
+        }
+
+        return new Uint8Array(0);
       }
 
       function roundNumber(value) {
@@ -1036,7 +1071,7 @@
       });
 
       async function buildViewBundle(viewPayload) {
-        const sourcePngBytes = new Uint8Array(viewPayload.pngBytes);
+        const sourcePngBytes = toUint8Array(viewPayload.pngBytes);
         const sourceImage = await loadImageFromBytes(sourcePngBytes);
         const textsJsonl = buildTextsJsonl(viewPayload.structureJson);
         const textCount = countTextEntries(textsJsonl);
@@ -1063,140 +1098,124 @@
         return exportModeInputs.find((input) => input.checked)?.value || 'paged';
       }
 
-      async function buildPagedZipPayload(payload) {
-        const entries = [];
-        const manifestPages = [];
-        let totalViewCount = 0;
+      async function appendPagedZipPage(session, page) {
+        const pageName = createPageName(page.pageNumber);
+        const pageDir = 'pages/' + pageName;
+        const pageViews = [];
 
-        for (const page of payload.pages) {
-          const pageName = createPageName(page.pageNumber);
-          const pageDir = 'pages/' + pageName;
-          const pageViews = [];
+        for (const view of page.views) {
+          const viewName = createViewName(page.pageNumber, view.viewNumber);
+          const viewDir = pageDir + '/views/' + viewName;
 
-          for (const view of page.views) {
-            const viewName = createViewName(page.pageNumber, view.viewNumber);
-            const viewDir = pageDir + '/views/' + viewName;
+          setLoading(true, '正在整理 ' + pageName + ' / View' + String(view.viewNumber) + '...');
 
-            setLoading(true, '正在整理 ' + pageName + ' / View' + String(view.viewNumber) + '...');
+          const viewBundle = await buildViewBundle(view);
 
-            const viewBundle = await buildViewBundle(view);
+          session.zipBuilder.addEntry(
+            viewDir + '/structure.json',
+            encodeText(JSON.stringify(view.structureJson, null, 2)),
+          );
+          session.zipBuilder.addEntry(
+            viewDir + '/structure-lite.json',
+            encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
+          );
+          session.zipBuilder.addEntry(
+            viewDir + '/texts.jsonl',
+            encodeText(viewBundle.textsJsonl),
+          );
+          session.zipBuilder.addEntry(viewDir + '/image.png', viewBundle.imageBytes);
 
-            entries.push({
-              path: viewDir + '/structure.json',
-              data: encodeText(JSON.stringify(view.structureJson, null, 2)),
-            });
-            entries.push({
-              path: viewDir + '/structure-lite.json',
-              data: encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
-            });
-            entries.push({
-              path: viewDir + '/texts.jsonl',
-              data: encodeText(viewBundle.textsJsonl),
-            });
-            entries.push({
+          pageViews.push({
+            viewNumber: view.viewNumber,
+            name: viewName,
+            frameId: view.frameId,
+            frameName: view.frameName,
+            bounds: view.bounds,
+            relativeTopLeft: view.relativeTopLeft,
+            path: viewDir,
+            image: {
+              width: viewBundle.imageWidth,
+              height: viewBundle.imageHeight,
               path: viewDir + '/image.png',
-              data: viewBundle.imageBytes,
-            });
-
-            pageViews.push({
-              viewNumber: view.viewNumber,
-              name: viewName,
-              frameId: view.frameId,
-              frameName: view.frameName,
-              bounds: view.bounds,
-              relativeTopLeft: view.relativeTopLeft,
-              path: viewDir,
-              image: {
-                width: viewBundle.imageWidth,
-                height: viewBundle.imageHeight,
-                path: viewDir + '/image.png',
-              },
-              textCount: viewBundle.textCount,
-            });
-          }
-
-          const pageJson = {
-            format: 'figma-ai-page.v1',
-            source: {
-              containerId: payload.containerId,
-              containerName: payload.containerName,
             },
-            pageNumber: page.pageNumber,
-            name: pageName,
-            label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
-            viewCount: pageViews.length,
-            frameNames: Array.isArray(page.frameNames) && page.frameNames.length
-              ? page.frameNames
-              : pageViews.map((view) => view.frameName),
-            views: pageViews,
-          };
-
-          entries.push({
-            path: pageDir + '/page.json',
-            data: encodeText(JSON.stringify(pageJson, null, 2)),
+            textCount: viewBundle.textCount,
           });
-
-          manifestPages.push({
-            pageNumber: page.pageNumber,
-            name: pageName,
-            label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
-            viewCount: pageViews.length,
-            frameNames: Array.isArray(page.frameNames) && page.frameNames.length
-              ? page.frameNames
-              : pageViews.map((view) => view.frameName),
-            views: pageViews.map((view) => ({
-              viewNumber: view.viewNumber,
-              name: view.name,
-              frameId: view.frameId,
-              frameName: view.frameName,
-              bounds: view.bounds,
-              relativeTopLeft: view.relativeTopLeft,
-              path: view.path,
-            })),
-          });
-
-          totalViewCount += pageViews.length;
         }
 
+        const pageJson = {
+          format: 'figma-ai-page.v1',
+          source: {
+            containerId: session.containerId,
+            containerName: session.containerName,
+          },
+          pageNumber: page.pageNumber,
+          name: pageName,
+          label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
+          viewCount: pageViews.length,
+          frameNames: Array.isArray(page.frameNames) && page.frameNames.length
+            ? page.frameNames
+            : pageViews.map((view) => view.frameName),
+          views: pageViews,
+        };
+
+        session.zipBuilder.addEntry(
+          pageDir + '/page.json',
+          encodeText(JSON.stringify(pageJson, null, 2)),
+        );
+
+        session.manifestPages.push({
+          pageNumber: page.pageNumber,
+          name: pageName,
+          label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
+          viewCount: pageViews.length,
+          frameNames: Array.isArray(page.frameNames) && page.frameNames.length
+            ? page.frameNames
+            : pageViews.map((view) => view.frameName),
+          views: pageViews.map((view) => ({
+            viewNumber: view.viewNumber,
+            name: view.name,
+            frameId: view.frameId,
+            frameName: view.frameName,
+            bounds: view.bounds,
+            relativeTopLeft: view.relativeTopLeft,
+            path: view.path,
+          })),
+        });
+
+        session.totalViewCount += pageViews.length;
+        session.receivedPages += 1;
+      }
+
+      function finalizePagedZipSession(session) {
         const manifest = {
           format: 'figma-ai-pack.v2',
           source: {
-            id: payload.containerId,
-            name: payload.containerName,
+            id: session.containerId,
+            name: session.containerName,
           },
-          pageCount: payload.pages.length,
-          totalViewCount,
-          ignoredNodeCount: payload.ignoredNodes.count,
-          ignoredNodes: payload.ignoredNodes.items,
-          pages: manifestPages,
+          pageCount: session.manifestPages.length,
+          totalViewCount: session.totalViewCount,
+          ignoredNodeCount: session.ignoredNodes.count,
+          ignoredNodes: session.ignoredNodes.items,
+          pages: session.manifestPages,
         };
 
-        entries.unshift({
-          path: 'manifest.json',
-          data: encodeText(JSON.stringify(manifest, null, 2)),
-        });
-        entries.unshift({
-          path: 'index.html',
-          data: encodeText(createPagedIndexHtml(payload, manifestPages, totalViewCount)),
-        });
-
-        const zipEntries = entries.map((entry) => ({
-          nameBytes: encodeText(entry.path),
-          data: entry.data,
-          crc: crc32(entry.data),
-          localHeaderOffset: 0,
-        }));
+        session.zipBuilder.addEntry('manifest.json', encodeText(JSON.stringify(manifest, null, 2)));
+        session.zipBuilder.addEntry(
+          'index.html',
+          encodeText(createPagedIndexHtml(session, session.manifestPages, session.totalViewCount)),
+        );
 
         return {
-          blob: createZip(zipEntries),
-          fileName: 'figma-ai-pack-' + payload.fileName + '.zip',
-          pageCount: payload.pages.length,
-          totalViewCount,
+          blob: session.zipBuilder.buildBlob(),
+          fileName: 'figma-ai-pack-' + session.fileName + '.zip',
+          pageCount: session.manifestPages.length,
+          totalViewCount: session.totalViewCount,
         };
       }
 
       async function buildAllInOneZipPayload(payload) {
-        const containerPngBytes = new Uint8Array(payload.containerPngBytes);
+        const containerPngBytes = toUint8Array(payload.containerPngBytes);
         const containerImage = await loadImageFromBytes(containerPngBytes);
         const allInOneJson = {
           format: 'figma-ai-all-in-one.v1',
@@ -1227,33 +1246,33 @@
           structure: payload.containerStructureJson,
         };
 
-        const entries = [
-          {
-            path: 'index.html',
-            data: encodeText(createAllInOneIndexHtml(payload)),
-          },
-          {
-            path: 'structure.json',
-            data: encodeText(JSON.stringify(allInOneJson, null, 2)),
-          },
-          {
-            path: 'image.png',
-            data: containerPngBytes,
-          },
-        ];
-
-        const zipEntries = entries.map((entry) => ({
-          nameBytes: encodeText(entry.path),
-          data: entry.data,
-          crc: crc32(entry.data),
-          localHeaderOffset: 0,
-        }));
+        const zipBuilder = createZipBuilder();
+        zipBuilder.addEntry('index.html', encodeText(createAllInOneIndexHtml(payload)));
+        zipBuilder.addEntry('structure.json', encodeText(JSON.stringify(allInOneJson, null, 2)));
+        zipBuilder.addEntry('image.png', containerPngBytes);
 
         return {
-          blob: createZip(zipEntries),
+          blob: zipBuilder.buildBlob(),
           fileName: 'figma-ai-pack-' + payload.fileName + '-all-in-one.zip',
         };
       }
+
+      function createZipSession(msg) {
+        return {
+          exportMode: msg.exportMode,
+          containerId: msg.containerId,
+          containerName: msg.containerName,
+          ignoredNodes: msg.ignoredNodes,
+          fileName: msg.fileName,
+          totalPages: Number(msg.totalPages || 0),
+          manifestPages: [],
+          totalViewCount: 0,
+          receivedPages: 0,
+          zipBuilder: msg.exportMode === 'paged' ? createZipBuilder() : null,
+        };
+      }
+
+      let activeZipSession = null;
 
       closeButton.addEventListener('click', () => {
         parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
@@ -1267,6 +1286,7 @@
           parent.postMessage({
             pluginMessage: {
               type: 'prepare-zip',
+              exportMode,
               overrides,
             },
           }, '*');
@@ -1320,21 +1340,68 @@
         }
 
         if (msg.type === 'set-loading') {
-          setLoading(Boolean(msg.isLoading), msg.isLoading ? '正在準備原始資料...' : '');
+          setLoading(
+            Boolean(msg.isLoading),
+            msg.isLoading
+              ? (typeof msg.message === 'string' && msg.message.length > 0 ? msg.message : '正在準備原始資料...')
+              : '',
+          );
         }
 
-        if (msg.type === 'prepare-zip-data') {
+        if (msg.type === 'prepare-zip-start') {
+          activeZipSession = createZipSession(msg);
+          setLoading(
+            true,
+            msg.exportMode === 'all-in-one'
+              ? '正在接收 All in one 原始資料...'
+              : '正在接收 Page/View 串流資料...',
+          );
+        }
+
+        if (msg.type === 'prepare-zip-page') {
           try {
-            const exportMode = getSelectedExportMode();
+            if (!activeZipSession || activeZipSession.exportMode !== 'paged') {
+              throw new Error('目前沒有可用的 Page/View 匯出工作階段。');
+            }
+
+            setLoading(true, '正在接收 ' + String(msg.pageIndex) + '/' + String(msg.totalPages) + ' 個 Page...');
+            await appendPagedZipPage(activeZipSession, msg.page);
+          } catch (error) {
+            console.error(error);
+            activeZipSession = null;
+            setLoading(false, '');
+            parent.postMessage({
+              pluginMessage: {
+                type: 'error',
+                message: error instanceof Error ? error.message : '處理 Page/View 串流資料時發生錯誤。',
+              },
+            }, '*');
+          }
+        }
+
+        if (msg.type === 'prepare-zip-complete') {
+          try {
+            if (!activeZipSession) {
+              throw new Error('沒有可完成的匯出工作階段。');
+            }
+
+            const exportMode = activeZipSession.exportMode;
             setLoading(true, exportMode === 'all-in-one' ? '正在建立 All in one ZIP...' : '正在建立 Page/View ZIP...');
             const zipPayload = exportMode === 'all-in-one'
-              ? await buildAllInOneZipPayload(msg)
-              : await buildPagedZipPayload(msg);
+              ? await buildAllInOneZipPayload({
+                ...activeZipSession,
+                containerStructureJson: msg.containerStructureJson,
+                containerPngBytes: msg.containerPngBytes,
+                pages: msg.pages || [],
+              })
+              : finalizePagedZipSession(activeZipSession);
             downloadBlob(zipPayload.blob, zipPayload.fileName);
+            activeZipSession = null;
             setLoading(true, 'ZIP 已觸發下載，正在關閉 plugin...');
             parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
           } catch (error) {
             console.error(error);
+            activeZipSession = null;
             setLoading(false, '');
             parent.postMessage({
               pluginMessage: {
