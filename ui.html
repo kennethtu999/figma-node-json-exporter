@@ -523,7 +523,6 @@
 
       function toLiteNode(node) {
         const lite = {
-          id: node.id,
           name: node.name,
           type: node.type,
         };
@@ -806,7 +805,6 @@
             const bounds = view.bounds || {};
             const relativeTopLeft = view.relativeTopLeft || {};
             const imagePath = escapeHtml(view.path + '/image.png');
-            const structurePath = escapeHtml(view.path + '/structure.json');
             const litePath = escapeHtml(view.path + '/structure-lite.json');
             const textsPath = escapeHtml(view.path + '/texts.jsonl');
 
@@ -823,7 +821,6 @@
               + '</div>'
               + '<div class="view-links">'
               + '<a href="' + imagePath + '">image</a>'
-              + '<a href="' + structurePath + '">structure</a>'
               + '<a href="' + litePath + '">structure-lite</a>'
               + '<a href="' + textsPath + '">texts</a>'
               + '</div>'
@@ -943,6 +940,58 @@
           + '</main>'
           + '</body>'
           + '</html>';
+      }
+
+      function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
+        const header = mode === 'paged'
+          ? '# Figma AI Pack - Page/View Export'
+          : '# Figma AI Pack - All in one Export';
+
+        const summary = [
+          '- source container: ' + String(payload.containerName || ''),
+          '- mode: ' + (mode === 'paged' ? 'Page/View' : 'All in one'),
+          '- exported at: ' + new Date().toISOString(),
+        ];
+
+        const modeSpecific = mode === 'paged'
+          ? [
+            '## 建議閱讀順序',
+            '1. manifest.json',
+            '2. index.html',
+            '3. pages/PageX/page.json',
+            '4. pages/PageX/views/PageX-ViewY/{structure-lite.json,texts.jsonl,image.png}',
+            '',
+            '## 匯出摘要',
+            '- page count: ' + String(pageCount),
+            '- view count: ' + String(totalViewCount),
+          ]
+          : [
+            '## 建議閱讀順序',
+            '1. structure.json',
+            '2. image.png',
+            '3. index.html',
+            '',
+            '## 匯出摘要',
+            '- page count: ' + String(pageCount),
+            '- view count: ' + String(totalViewCount),
+          ];
+
+        return [
+          header,
+          '',
+          '這份 README 會說明此 ZIP 的模式與檔案用途，方便離線交接。',
+          '',
+          '## 基本資訊',
+          ...summary,
+          '',
+          ...modeSpecific,
+          '',
+          '## 主要檔案用途',
+          '- index.html: 快速視覺預覽',
+          '- structure-lite.json: 給 AI/前端生成的精簡語意結構（Page/View）',
+          '- texts.jsonl: 文字索引（保留 id）',
+          '- structure.json: 完整結構（All in one）',
+        ].join('\n');
       }
 
       function getPageSummary(pageNumber) {
@@ -1112,10 +1161,6 @@
           const viewBundle = await buildViewBundle(view);
 
           session.zipBuilder.addEntry(
-            viewDir + '/structure.json',
-            encodeText(JSON.stringify(view.structureJson, null, 2)),
-          );
-          session.zipBuilder.addEntry(
             viewDir + '/structure-lite.json',
             encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
           );
@@ -1205,6 +1250,10 @@
           'index.html',
           encodeText(createPagedIndexHtml(session, session.manifestPages, session.totalViewCount)),
         );
+        session.zipBuilder.addEntry(
+          'README.md',
+          encodeText(createExportReadmeMarkdown('paged', session, session.manifestPages.length, session.totalViewCount)),
+        );
 
         return {
           blob: session.zipBuilder.buildBlob(),
@@ -1250,6 +1299,19 @@
         zipBuilder.addEntry('index.html', encodeText(createAllInOneIndexHtml(payload)));
         zipBuilder.addEntry('structure.json', encodeText(JSON.stringify(allInOneJson, null, 2)));
         zipBuilder.addEntry('image.png', containerPngBytes);
+        zipBuilder.addEntry(
+          'README.md',
+          encodeText(
+            createExportReadmeMarkdown(
+              'all-in-one',
+              payload,
+              Array.isArray(payload.pages) ? payload.pages.length : 0,
+              Array.isArray(payload.pages)
+                ? payload.pages.reduce((sum, page) => sum + (Array.isArray(page.views) ? page.views.length : 0), 0)
+                : 0,
+            ),
+          ),
+        );
 
         return {
           blob: zipBuilder.buildBlob(),
