@@ -36,6 +36,18 @@ AI agent 開始工作前請依序閱讀：
 - `scripts/build-ui.js` 會把 UI 模組串成 inline script，重新產生 `ui.html`
 - 不要直接手改產出的 `ui.html` 邏輯；要改 UI 行為請修改 `ui.template.html` 或 `ui/*.js`
 
+## ZIP README Rules
+
+- ZIP 根目錄的 `README.md` 由 `ui/exporters.js` 的 `createExportReadmeMarkdown()` 生成
+- `Page/View` 與 `All in one` 模式都必須輸出對應模式的 AI agent 使用說明
+- ZIP README 必須包含：
+  - 建議閱讀順序
+  - 主要檔案用途
+  - AI agent 建議流程
+  - 大 JSON 使用原則
+- README 文案要明確引導 AI agent 不要把整份 `structure-lite.json` / `structure.json` 直接貼進 prompt，而是先定位再局部取用
+- 若調整 ZIP README 的內容結構或使用指引，`README.md` 與 `AGENTS.md` 必須一起同步
+
 ## structure-lite.json Rules
 
 - `structure-lite.json` 目前格式版本為 `figma-ai-content.v2`

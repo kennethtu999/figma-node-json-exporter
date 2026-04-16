@@ -1031,13 +1031,67 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
     ]
     : [
       '## 建議閱讀順序',
-      '1. structure.json',
+      '1. index.html',
       '2. image.png',
-      '3. index.html',
+      '3. structure.json',
       '',
       '## 匯出摘要',
       '- page count: ' + String(pageCount),
       '- view count: ' + String(totalViewCount),
+    ];
+
+  const filePurpose = mode === 'paged'
+    ? [
+      '## 主要檔案用途',
+      '- manifest.json: 整體 page / view 路由與檔案入口',
+      '- page.json: 單一 page 的摘要與 view 清單',
+      '- index.html: 快速視覺預覽',
+      '- texts.jsonl: 文字索引（保留 id 與 path）',
+      '- image.png: 與結構對照的畫面截圖',
+      '- structure-lite.json: 給 AI/前端生成的精簡語意結構（Page/View）',
+    ]
+    : [
+      '## 主要檔案用途',
+      '- index.html: 快速視覺預覽與 page/view 摘要',
+      '- image.png: 整個容器的完整畫面',
+      '- structure.json: All in one 的完整結構與 page/view 摘要',
+    ];
+
+  const agentWorkflow = mode === 'paged'
+    ? [
+      '## AI Agent 建議流程',
+      '1. 先讀 manifest.json，確認有哪些 page / view 與各自路徑。',
+      '2. 再讀目標 pages/PageX/page.json，縮小到要處理的 view。',
+      '3. 先用 texts.jsonl 與 image.png 理解文案與畫面對照。',
+      '4. 只有在需要重建 layout / component tree / 樣式時，再局部查看 structure-lite.json。',
+      '',
+      '## 任務對應檔案',
+      '- 找文案、比對文字內容、抽取可翻譯字串：優先讀 texts.jsonl。',
+      '- 看畫面區塊、比對視覺位置、人工快速理解：優先讀 image.png 與 index.html。',
+      '- 重建 layout、推 flex / auto layout、分析 component 結構：再讀 structure-lite.json。',
+      '',
+      '## 大 JSON 使用原則',
+      '- 不要把整份 structure-lite.json 直接貼進 prompt。',
+      '- 先用 manifest.json / page.json / texts.jsonl 定位目標區塊，再從 structure-lite.json 抽相關 subtree。',
+      '- 只提供與任務有關的節點、祖先鏈、必要的兄弟節點摘要給模型。',
+      '- structure-lite.json 是資料來源，不是 prompt 本體。',
+    ]
+    : [
+      '## AI Agent 建議流程',
+      '1. 先讀 index.html 與 image.png，建立整體畫面與區塊分布的全局認知。',
+      '2. 若只需定位 page / view 或某個區塊，先參考 structure.json 內的 pages 摘要。',
+      '3. 只有在需要完整 fallback / debug / 深入結構分析時，再局部查看 structure.json 的 structure 內容。',
+      '',
+      '## 任務對應檔案',
+      '- 快速理解整體畫面與章節分布：優先讀 index.html 與 image.png。',
+      '- 找 page / view 對照與 frame 摘要：優先讀 structure.json 內的 pages。',
+      '- 做完整 debug、容器級結構分析、缺少 Page/View 資料時的 fallback：再讀 structure.json。',
+      '',
+      '## 大 JSON 使用原則',
+      '- 不要把整份 structure.json 一次全文餵給模型。',
+      '- 先從 index.html、image.png、pages 摘要定位範圍，再抽出相關結構片段。',
+      '- structure.json 是完整 fallback / debug 資料，適合檢索後局部使用。',
+      '- structure.json 是資料來源，不是 prompt 本體。',
     ];
 
   return [
@@ -1050,11 +1104,9 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
     '',
     ...modeSpecific,
     '',
-    '## 主要檔案用途',
-    '- index.html: 快速視覺預覽',
-    '- structure-lite.json: 給 AI/前端生成的精簡語意結構（Page/View）',
-    '- texts.jsonl: 文字索引（保留 id）',
-    '- structure.json: 完整結構（All in one）',
+    ...filePurpose,
+    '',
+    ...agentWorkflow,
   ].join('\n');
 }
 

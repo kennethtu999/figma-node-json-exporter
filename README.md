@@ -15,7 +15,7 @@
 - ZIP 根目錄輸出：
   - `manifest.json`
   - `index.html`
-  - `README.md`
+  - `README.md`（包含檔案用途與 AI agent 建議閱讀流程）
 
 ### `All in one`
 
@@ -23,7 +23,7 @@
   - `image.png`
   - `structure.json`
   - `index.html`
-  - `README.md`
+  - `README.md`（包含檔案用途與 AI agent 建議閱讀流程）
 
 ## `structure-lite.json`
 
@@ -165,6 +165,19 @@
 只在 `All in one` 模式輸出。  
 它保留整個容器的 parsed tree，適合做較完整的 debug / fallback 分析。
 
+## ZIP README Behavior
+
+每份輸出的 ZIP 根目錄都會附帶 `README.md`，內容會依輸出模式自動包含：
+
+- 建議閱讀順序
+- 主要檔案用途
+- AI agent 建議流程
+- 大 JSON 的使用原則
+
+對 `Page/View` 模式，README 會引導先讀 `manifest.json` / `page.json` / `texts.jsonl` / `image.png`，最後才局部查看 `structure-lite.json`。
+
+對 `All in one` 模式，README 會引導先讀 `index.html` / `image.png` 建立整體理解，再從 `structure.json` 的摘要與局部結構做 fallback 分析。
+
 ## Current Constraints
 
 - `structure-lite.json` 不是完整 debug dump
@@ -173,6 +186,7 @@
 - `textStyle.segments` 只在文字樣式有切段時輸出
 - `component` 目前不主動讀取 instance 的 main component 詳細資料
 - 讀取 `variantProperties` / `componentPropertyReferences` 時採防呆模式；若 Figma 文件中的 component set 有錯，匯出會略過該 metadata，而不是整體失敗
+- 輸出的 ZIP README 只提供使用策略，不會額外切 shard 或新增 sidecar index 檔
 
 ## Usage
 
