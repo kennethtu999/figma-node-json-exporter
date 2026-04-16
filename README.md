@@ -2,100 +2,134 @@
 
 這個 plugin 會把 Figma 中選取的單一父層容器整理成適合 AI 與前端程式處理的 ZIP。
 
-目前有兩種輸出模式：
+## Output Modes
 
-- `Page/View`
-  - 依第一層 `FRAME` 的位置切成多個 page / view
-  - 每個 view 輸出：
-    - `image.png`
-    - `structure-lite.json`
-    - `texts.jsonl`
-  - 每個 page 額外輸出 `page.json`
-  - ZIP 根目錄輸出 `manifest.json`、`index.html`、`README.md`
-- `All in one`
-  - 整個容器只輸出：
-    - `image.png`
-    - `index.html`
-    - `README.md`
+### `Page/View`
 
-## 目前版本的重點做法
+- 依第一層 `FRAME` 的位置切成多個 page / view
+- 每個 view 輸出：
+  - `image.png`
+  - `structure-lite.json`
+  - `texts.jsonl`
+- 每個 page 額外輸出 `page.json`
+- ZIP 根目錄輸出：
+  - `manifest.json`
+  - `index.html`
+  - `README.md`
 
-- `Page/View` 模式不輸出每個 view `structure-lite.json`
-- `structure-lite.json` 為 semantic 版
-  - 不輸出 `id`
-  - 保留 `TEXT / LAYOUT / COMPONENT` 生成 Vue 所需的骨架資訊
-  - 已補上高還原 CSS 所需的 `style / textStyle`
-  - 會盡量展平無意義 wrapper，減少裝飾性節點噪音
-- `All in one` 的 `structure.json` 仍保留較完整的容器樹
-  - 目前仍含 `id`
-  - 已補上 layout / component metadata
-- `texts.jsonl` 仍保留文字抽取結果與 `id`
-  - 方便文字索引與後續對照
-- ZIP 目前一律 `STORE`
-  - 先以穩定下載為優先，不做文字壓縮
-- plugin 端有 selection analysis / parsed structure cache
-  - 選取不變時可重用分析結果
-- UI 端對 paged stream 有 queue 保護
-  - 避免 `prepare-zip-complete` 早於 page write 完成造成空 ZIP
-- UI 邏輯目前維持在 `ui.html` 內（`<script>`）
-  - 以單檔方式配合 Figma plugin 載入流程
+### `All in one`
 
-## `structure-lite.json` 目前保留哪些資訊
+- 整個容器輸出：
+  - `image.png`
+  - `structure.json`
+  - `index.html`
+  - `README.md`
 
-semantic `structure-lite.json` 主要保留：
+## `structure-lite.json`
+
+`structure-lite.json` 目前格式版本為 `figma-ai-content.v2`。
+
+它是給 AI 與前端使用的精簡語意樹，重點是保留足夠的結構、樣式、文字與 component 資訊，用來：
+
+- 產生 Vue component tree
+- 推 auto layout / flex 結構
+- 重建主要外觀 CSS
+- 重建 typography / color token
+- 搭配 `texts.jsonl` / `image.png` 做內容與畫面對照
+
+### Top-level Fields
+
+- `format`
+- `image`
+  - `path`
+  - `width`
+  - `height`
+  - `sourceScale`
+- `stats`
+  - `rootCount`
+  - `textCount`
+- `roots`
+
+### Node Fields
+
+每個 node 可能包含：
 
 - `type`
 - `name`
-  - 只在 root / semantic container / component 節點保留
 - `bounds`
 - `text`
-  - 只在 `TEXT` 節點保留
 - `style`
-  - `fills`
-  - `strokes`
-  - `strokeWeight / strokeAlign / strokeCap / strokeJoin / strokeDashes`
-  - `cornerRadius / cornerRadii`
-  - `effects`
-  - `opacity / blendMode / clipsContent`
-- `textStyle`
-  - `fontFamily / fontStyle / fontWeight / fontSize`
-  - `lineHeight / letterSpacing`
-  - `textCase / textDecoration`
-  - `textAlignHorizontal / textAlignVertical`
-  - `paragraphSpacing / paragraphIndent`
-  - 混合字級 / 顏色時的 `segments`
 - `layout`
-  - `mode`
-  - `itemSpacing`
-  - `padding`
-  - `primaryAxisAlign`
-  - `counterAxisAlign`
-  - `sizingHorizontal`
-  - `sizingVertical`
 - `layoutItem`
-  - `align`
-  - `grow`
-  - `positioning`
+- `textStyle`
 - `component`
-  - `kind`
-  - `name`
-  - `variantProperties`
 - `children`
 
-這份 JSON 比較適合：
+### `style`
 
-- 產生 Vue component tree
-- 推 layout / flex 結構
-- 重建高還原外觀 CSS
-- 重建 typography / color token
+- `visible`
+- `opacity`
+- `blendMode`
+- `clipsContent`
+- `fills`
+- `strokes`
+- `strokeWeight`
+- `strokeAlign`
+- `strokeCap`
+- `strokeJoin`
+- `strokeDashes`
+- `cornerRadius`
+- `cornerRadii`
+- `effects`
 
-目前仍有取捨：
+### `layout`
 
-- `structure-lite.json` 不是完整 debug dump
-- 不會保留所有 Figma 專用欄位
-- 如果文字節點本身非常複雜，仍以「可生成」優先，而不是 100% 還原 Figma 內部模型
+- `mode`
+- `wrap`
+- `sizingHorizontal`
+- `sizingVertical`
+- `primaryAxisSizing`
+- `counterAxisSizing`
+- `primaryAxisAlign`
+- `counterAxisAlign`
+- `counterAxisAlignContent`
+- `itemSpacing`
+- `counterAxisSpacing`
+- `itemReverseZIndex`
+- `strokesIncludedInLayout`
+- `padding`
 
-## 輸出內容說明
+### `layoutItem`
+
+- `align`
+- `grow`
+- `positioning`
+- `sizingHorizontal`
+- `sizingVertical`
+
+### `textStyle`
+
+- `fontFamily`
+- `fontStyle`
+- `fontSize`
+- `lineHeight`
+- `letterSpacing`
+- `textCase`
+- `textDecoration`
+- `textAlignHorizontal`
+- `textAlignVertical`
+- `paragraphSpacing`
+- `paragraphIndent`
+- `segments`
+
+### `component`
+
+- `kind`
+- `name`
+- `variantProperties`
+- `componentPropertyReferences`
+
+## Other Exported Files
 
 ### `manifest.json`
 
@@ -115,10 +149,6 @@ semantic `structure-lite.json` 主要保留：
 - `frameNames`
 - `views`
 
-### `structure-lite.json`
-
-給 AI 與前端生成用途的 semantic 樹。
-
 ### `texts.jsonl`
 
 抽出的文字內容索引。每一行是一筆文字節點，包含：
@@ -133,26 +163,18 @@ semantic `structure-lite.json` 主要保留：
 ### `structure.json`
 
 只在 `All in one` 模式輸出。  
-它保留整個容器的 parsed tree，仍適合做較完整的 debug / fallback 分析。
+它保留整個容器的 parsed tree，適合做較完整的 debug / fallback 分析。
 
-### `README.md` (ZIP 內)
+## Current Constraints
 
-每次匯出的 ZIP 根目錄都會附上一份 `README.md`，方便人或 AI agent 在離線拿到資料時快速理解：
+- `structure-lite.json` 不是完整 debug dump
+- 不會保留所有 Figma 專用欄位
+- 不會保留完整 constraint / variable binding / interaction schema
+- `textStyle.segments` 只在文字樣式有切段時輸出
+- `component` 目前不主動讀取 instance 的 main component 詳細資料
+- 讀取 `variantProperties` / `componentPropertyReferences` 時採防呆模式；若 Figma 文件中的 component set 有錯，匯出會略過該 metadata，而不是整體失敗
 
-- 這包資料是哪種輸出模式
-- 建議閱讀順序
-- 主要檔案用途
-
-## 目前已知取捨
-
-- 下載穩定性優先於壓縮率
-  - 之前曾嘗試文字壓縮，但在大 JSON 上會卡 UI，已移除
-- `structure-lite.json` 現在偏向「可生成」而不是「可回朔」
-  - 不再保留 `id`
-- `texts.jsonl` 與 `All in one structure.json` 仍保留較多回朔資訊
-  - 讓 debug 與 fallback 不至於完全失去對照能力
-
-## 在 Figma 中如何使用
+## Usage
 
 1. 選取一個父層容器
 2. 執行 plugin
@@ -167,7 +189,7 @@ semantic `structure-lite.json` 主要保留：
 - 只分析該容器的第一層子節點
 - 第一層中只有符合條件的 `FRAME` 會被當成可匯出的畫面
 
-## 開發
+## Development
 
 安裝依賴：
 
@@ -181,23 +203,50 @@ npm install
 npm run build
 ```
 
+只重建 UI：
+
+```bash
+npm run build:ui
+```
+
 檢查：
 
 ```bash
 npm run lint
 ```
 
-目前重要檔案：
+## Key Files
 
 - `code.ts`
   - plugin 主邏輯
   - selection analysis
-  - cache
-  - raw parsed tree / export stream
+  - raw parsed tree
+  - export stream
+- `ui.template.html`
+  - UI HTML/CSS 樣板
 - `ui.html`
-  - UI 結構與樣式
-  - UI 邏輯
-  - semantic `structure-lite` build
-  - ZIP write / download
-- `AGENTS.md`
-  - 給後續 AI agent 快速接手的背景說明
+  - build 產物
+  - 提供 Figma `figma.showUI(__html__)` 載入
+- `ui/app.js`
+  - UI 入口
+  - DOM 綁定
+  - plugin message / 使用者互動流程
+- `ui/pages.js`
+  - Page/View 狀態管理
+  - 重排與編號邏輯
+- `ui/exporters.js`
+  - ZIP session
+  - `Page/View` / `All in one` 輸出組裝
+- `ui/shared.js`
+  - 共用工具
+  - ZIP builder
+  - `structure-lite.json` build
+- `scripts/build-ui.js`
+  - 將 `ui/*.js` 模組串成 inline script
+  - 重新產生 `ui.html`
+
+## Documentation Rule
+
+`README.md` 與 `AGENTS.md` 必須永遠描述目前最終狀態。
+
+未來任何 AI agent 完成任務後，都必須重新檢查並同步更新這兩份文件；文件不得保留歷程敘述、修復過程、暫時方案或版本演進描述。

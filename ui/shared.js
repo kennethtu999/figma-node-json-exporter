@@ -212,6 +212,26 @@ function toLiteNode(node) {
     lite.text = node.characters;
   }
 
+  if (node.style) {
+    lite.style = node.style;
+  }
+
+  if (node.layout) {
+    lite.layout = node.layout;
+  }
+
+  if (node.layoutItem) {
+    lite.layoutItem = node.layoutItem;
+  }
+
+  if (node.textStyle) {
+    lite.textStyle = node.textStyle;
+  }
+
+  if (node.component) {
+    lite.component = node.component;
+  }
+
   if (Array.isArray(node.children) && node.children.length > 0) {
     lite.children = node.children.map((child) => toLiteNode(child));
   }
@@ -274,7 +294,7 @@ export function loadImageFromBytes(bytes) {
 
 export function buildStructureLite(structureJson, imageMeta, textCount) {
   return {
-    format: 'figma-ai-content.v1',
+    format: 'figma-ai-content.v2',
     image: imageMeta,
     stats: {
       rootCount: 1,

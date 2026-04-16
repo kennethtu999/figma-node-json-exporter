@@ -141,6 +141,348 @@ function getSingleLinePageTitle(node) {
         .filter((text, index, array) => array.indexOf(text) === index);
     return orderedTexts.length > 0 ? orderedTexts.join(' ') : null;
 }
+function isMixed(value) {
+    return value === figma.mixed;
+}
+function serializeNumberOrMixed(value) {
+    if (typeof value === 'undefined') {
+        return undefined;
+    }
+    return isMixed(value) ? 'mixed' : value;
+}
+function serializeEnumOrMixed(value) {
+    if (typeof value === 'undefined') {
+        return undefined;
+    }
+    return isMixed(value) ? 'mixed' : value;
+}
+function serializeColor(color, opacity = 1) {
+    const alpha = 'a' in color ? color.a : opacity;
+    return {
+        r: roundToTwoDecimals(color.r),
+        g: roundToTwoDecimals(color.g),
+        b: roundToTwoDecimals(color.b),
+        a: roundToTwoDecimals(alpha),
+    };
+}
+function serializePaint(paint) {
+    var _a;
+    const serialized = {
+        type: paint.type,
+    };
+    if ('visible' in paint && typeof paint.visible === 'boolean') {
+        serialized.visible = paint.visible;
+    }
+    if ('opacity' in paint && typeof paint.opacity === 'number') {
+        serialized.opacity = roundToTwoDecimals(paint.opacity);
+    }
+    if ('blendMode' in paint && typeof paint.blendMode === 'string') {
+        serialized.blendMode = paint.blendMode;
+    }
+    if ('color' in paint && paint.color) {
+        serialized.color = serializeColor(paint.color, typeof paint.opacity === 'number' ? paint.opacity : 1);
+    }
+    if ('gradientStops' in paint && Array.isArray(paint.gradientStops)) {
+        serialized.gradientStops = paint.gradientStops.map((stop) => ({
+            position: roundToTwoDecimals(stop.position),
+            color: serializeColor(stop.color),
+        }));
+    }
+    if ('scaleMode' in paint && typeof paint.scaleMode === 'string') {
+        serialized.scaleMode = paint.scaleMode;
+    }
+    if ('imageHash' in paint) {
+        serialized.imageHash = (_a = paint.imageHash) !== null && _a !== void 0 ? _a : null;
+    }
+    return serialized;
+}
+function serializePaints(paints) {
+    if (typeof paints === 'undefined') {
+        return undefined;
+    }
+    if (isMixed(paints)) {
+        return 'mixed';
+    }
+    return paints.map((paint) => serializePaint(paint));
+}
+function serializeEffect(effect) {
+    const serialized = {
+        type: effect.type,
+        visible: effect.visible,
+    };
+    if ('radius' in effect && typeof effect.radius === 'number') {
+        serialized.radius = roundToTwoDecimals(effect.radius);
+    }
+    if ('color' in effect && effect.color) {
+        serialized.color = serializeColor(effect.color);
+    }
+    if ('offset' in effect && effect.offset) {
+        serialized.offset = {
+            x: roundToTwoDecimals(effect.offset.x),
+            y: roundToTwoDecimals(effect.offset.y),
+        };
+    }
+    if ('spread' in effect && typeof effect.spread === 'number') {
+        serialized.spread = roundToTwoDecimals(effect.spread);
+    }
+    if ('blendMode' in effect && typeof effect.blendMode === 'string') {
+        serialized.blendMode = effect.blendMode;
+    }
+    if ('showShadowBehindNode' in effect && typeof effect.showShadowBehindNode === 'boolean') {
+        serialized.showShadowBehindNode = effect.showShadowBehindNode;
+    }
+    return serialized;
+}
+function getNodeStyle(node) {
+    const style = {};
+    if ('opacity' in node && typeof node.opacity === 'number') {
+        style.opacity = roundToTwoDecimals(node.opacity);
+    }
+    if ('blendMode' in node && typeof node.blendMode === 'string') {
+        style.blendMode = node.blendMode;
+    }
+    if ('visible' in node && typeof node.visible === 'boolean') {
+        style.visible = node.visible;
+    }
+    if ('clipsContent' in node && typeof node.clipsContent === 'boolean') {
+        style.clipsContent = node.clipsContent;
+    }
+    if ('fills' in node) {
+        style.fills = serializePaints(node.fills);
+    }
+    if ('strokes' in node) {
+        style.strokes = serializePaints(node.strokes);
+    }
+    if ('strokeWeight' in node) {
+        style.strokeWeight = serializeNumberOrMixed(node.strokeWeight);
+    }
+    if ('strokeAlign' in node) {
+        style.strokeAlign = serializeEnumOrMixed(node.strokeAlign);
+    }
+    if ('strokeCap' in node) {
+        style.strokeCap = serializeEnumOrMixed(node.strokeCap);
+    }
+    if ('strokeJoin' in node) {
+        style.strokeJoin = serializeEnumOrMixed(node.strokeJoin);
+    }
+    if ('dashPattern' in node && Array.isArray(node.dashPattern) && node.dashPattern.length > 0) {
+        style.strokeDashes = node.dashPattern.map((value) => roundToTwoDecimals(value));
+    }
+    if ('cornerRadius' in node) {
+        style.cornerRadius = serializeNumberOrMixed(node.cornerRadius);
+    }
+    if ('topLeftRadius' in node
+        && 'topRightRadius' in node
+        && 'bottomRightRadius' in node
+        && 'bottomLeftRadius' in node) {
+        style.cornerRadii = [
+            roundToTwoDecimals(node.topLeftRadius),
+            roundToTwoDecimals(node.topRightRadius),
+            roundToTwoDecimals(node.bottomRightRadius),
+            roundToTwoDecimals(node.bottomLeftRadius),
+        ];
+    }
+    if ('effects' in node && Array.isArray(node.effects) && node.effects.length > 0) {
+        style.effects = node.effects.map((effect) => serializeEffect(effect));
+    }
+    return Object.keys(style).length > 0 ? style : undefined;
+}
+function getNodeLayout(node) {
+    if (!('layoutMode' in node)) {
+        return undefined;
+    }
+    const layout = {
+        mode: node.layoutMode,
+    };
+    if ('layoutWrap' in node) {
+        layout.wrap = node.layoutWrap;
+    }
+    if ('layoutSizingHorizontal' in node) {
+        layout.sizingHorizontal = node.layoutSizingHorizontal;
+    }
+    if ('layoutSizingVertical' in node) {
+        layout.sizingVertical = node.layoutSizingVertical;
+    }
+    if (node.layoutMode !== 'NONE' && node.layoutMode !== 'GRID') {
+        layout.primaryAxisSizing = node.primaryAxisSizingMode;
+        layout.counterAxisSizing = node.counterAxisSizingMode;
+        layout.primaryAxisAlign = node.primaryAxisAlignItems;
+        layout.counterAxisAlign = node.counterAxisAlignItems;
+        layout.counterAxisAlignContent = node.counterAxisAlignContent;
+        layout.itemSpacing = roundToTwoDecimals(node.itemSpacing);
+        if (typeof node.counterAxisSpacing === 'number') {
+            layout.counterAxisSpacing = roundToTwoDecimals(node.counterAxisSpacing);
+        }
+        layout.itemReverseZIndex = node.itemReverseZIndex;
+        layout.strokesIncludedInLayout = node.strokesIncludedInLayout;
+        layout.padding = {
+            top: roundToTwoDecimals(node.paddingTop),
+            right: roundToTwoDecimals(node.paddingRight),
+            bottom: roundToTwoDecimals(node.paddingBottom),
+            left: roundToTwoDecimals(node.paddingLeft),
+        };
+    }
+    return layout;
+}
+function getNodeLayoutItem(node) {
+    if (!('layoutAlign' in node)) {
+        return undefined;
+    }
+    const layoutItem = {
+        align: node.layoutAlign,
+        grow: roundToTwoDecimals(node.layoutGrow),
+        positioning: node.layoutPositioning,
+    };
+    if ('layoutSizingHorizontal' in node) {
+        layoutItem.sizingHorizontal = node.layoutSizingHorizontal;
+    }
+    if ('layoutSizingVertical' in node) {
+        layoutItem.sizingVertical = node.layoutSizingVertical;
+    }
+    return Object.values(layoutItem).some((value) => typeof value !== 'undefined') ? layoutItem : undefined;
+}
+function serializeTextMetric(metric) {
+    if (isMixed(metric)) {
+        return 'mixed';
+    }
+    const serialized = {
+        unit: metric.unit,
+    };
+    if ('value' in metric && typeof metric.value === 'number') {
+        serialized.value = roundToTwoDecimals(metric.value);
+    }
+    return serialized;
+}
+function serializeFontName(fontName) {
+    if (isMixed(fontName)) {
+        return {
+            fontFamily: 'mixed',
+            fontStyle: 'mixed',
+        };
+    }
+    return {
+        fontFamily: fontName.family,
+        fontStyle: fontName.style,
+    };
+}
+function getTextSegments(node) {
+    const segments = node.getStyledTextSegments([
+        'fontName',
+        'fontSize',
+        'lineHeight',
+        'letterSpacing',
+        'textCase',
+        'textDecoration',
+        'fills',
+    ]);
+    if (segments.length <= 1) {
+        return undefined;
+    }
+    return segments.map((segment) => {
+        const fontInfo = serializeFontName(segment.fontName);
+        const lineHeight = serializeTextMetric(segment.lineHeight);
+        const letterSpacing = serializeTextMetric(segment.letterSpacing);
+        return {
+            start: segment.start,
+            end: segment.end,
+            text: segment.characters,
+            fontFamily: typeof fontInfo.fontFamily === 'string' && fontInfo.fontFamily !== 'mixed'
+                ? fontInfo.fontFamily
+                : undefined,
+            fontStyle: typeof fontInfo.fontStyle === 'string' && fontInfo.fontStyle !== 'mixed'
+                ? fontInfo.fontStyle
+                : undefined,
+            fontSize: typeof segment.fontSize === 'number' ? roundToTwoDecimals(segment.fontSize) : undefined,
+            lineHeight: lineHeight === 'mixed' ? undefined : lineHeight,
+            letterSpacing: letterSpacing === 'mixed' ? undefined : letterSpacing,
+            textCase: segment.textCase,
+            textDecoration: segment.textDecoration,
+            fills: serializePaints(segment.fills),
+        };
+    });
+}
+function getNodeTextStyle(node) {
+    if (node.type !== 'TEXT') {
+        return undefined;
+    }
+    const fontInfo = serializeFontName(node.fontName);
+    const textStyle = {
+        fontFamily: fontInfo.fontFamily,
+        fontStyle: fontInfo.fontStyle,
+        fontSize: serializeNumberOrMixed(node.fontSize),
+        lineHeight: serializeTextMetric(node.lineHeight),
+        letterSpacing: serializeTextMetric(node.letterSpacing),
+        textCase: serializeEnumOrMixed(node.textCase),
+        textDecoration: serializeEnumOrMixed(node.textDecoration),
+        textAlignHorizontal: node.textAlignHorizontal,
+        textAlignVertical: node.textAlignVertical,
+        paragraphSpacing: roundToTwoDecimals(node.paragraphSpacing),
+        paragraphIndent: roundToTwoDecimals(node.paragraphIndent),
+        segments: getTextSegments(node),
+    };
+    return textStyle;
+}
+function readVariantProperties(node) {
+    try {
+        const variantProperties = node.variantProperties;
+        return variantProperties
+            ? Object.fromEntries(Object.entries(variantProperties))
+            : undefined;
+    }
+    catch (_error) {
+        void _error;
+        // Figma may throw here when the backing component set/variant graph has document errors.
+        return undefined;
+    }
+}
+function readComponentPropertyReferences(node) {
+    if (!('componentPropertyReferences' in node)) {
+        return undefined;
+    }
+    try {
+        const references = node.componentPropertyReferences;
+        return references
+            ? Object.fromEntries(Object.entries(references).map(([key, value]) => [key, String(value)]))
+            : undefined;
+    }
+    catch (_error) {
+        void _error;
+        return undefined;
+    }
+}
+function getNodeComponent(node) {
+    if (node.type === 'INSTANCE') {
+        const variantProperties = readVariantProperties(node);
+        return {
+            kind: variantProperties && Object.keys(variantProperties).length > 0 ? 'VARIANT' : 'INSTANCE',
+            name: node.name,
+            variantProperties,
+        };
+    }
+    if (node.type === 'COMPONENT') {
+        const variantProperties = readVariantProperties(node);
+        return {
+            kind: variantProperties && Object.keys(variantProperties).length > 0 ? 'VARIANT' : 'COMPONENT',
+            name: node.name,
+            variantProperties,
+        };
+    }
+    if (node.type === 'COMPONENT_SET') {
+        return {
+            kind: 'COMPONENT_SET',
+            name: node.name,
+        };
+    }
+    const componentPropertyReferences = readComponentPropertyReferences(node);
+    if (componentPropertyReferences) {
+        return {
+            kind: 'FRAME',
+            name: node.name,
+            componentPropertyReferences,
+        };
+    }
+    return undefined;
+}
 function parseNode(node) {
     const data = {
         id: node.id,
@@ -165,6 +507,26 @@ function parseNode(node) {
     }
     if (node.type === 'TEXT') {
         data.characters = node.characters;
+    }
+    const style = getNodeStyle(node);
+    if (style) {
+        data.style = style;
+    }
+    const layout = getNodeLayout(node);
+    if (layout) {
+        data.layout = layout;
+    }
+    const layoutItem = getNodeLayoutItem(node);
+    if (layoutItem) {
+        data.layoutItem = layoutItem;
+    }
+    const textStyle = getNodeTextStyle(node);
+    if (textStyle) {
+        data.textStyle = textStyle;
+    }
+    const component = getNodeComponent(node);
+    if (component) {
+        data.component = component;
     }
     if ('children' in node) {
         data.children = node.children.map((child) => parseNode(child));
