@@ -27,6 +27,39 @@ module.exports = tseslint.config(
     },
   },
   {
+    files: ['ui/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: {
+        Blob: 'readonly',
+        HTMLInputElement: 'readonly',
+        Image: 'readonly',
+        TextEncoder: 'readonly',
+        URL: 'readonly',
+        console: 'readonly',
+        document: 'readonly',
+        parent: 'readonly',
+        window: 'readonly',
+      },
+    },
+  },
+  {
+    files: ['scripts/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'commonjs',
+      globals: {
+        __dirname: 'readonly',
+        process: 'readonly',
+        require: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+  {
     ignores: ['code.js', 'dist', 'eslint.config.js'],
   },
 )

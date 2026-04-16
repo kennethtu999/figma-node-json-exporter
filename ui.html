@@ -299,1184 +299,1244 @@
     </div>
 
     <script>
-      const selectionInfo = document.getElementById('selection-info');
-      const closeButton = document.getElementById('close-button');
-      const prepareButton = document.getElementById('prepare-button');
-      const statusBox = document.getElementById('status');
-      const pickerNote = document.getElementById('picker-note');
-      const pagesListContent = document.getElementById('pages-list-content');
-      const exportModeInputs = Array.from(document.querySelectorAll('input[name="export-mode"]'));
-      let currentPages = [];
-      let pageGroupSequence = 0;
+;(() => {
 
-      const crcTable = (() => {
-        const table = new Uint32Array(256);
+// ui/shared.js
+const crcTable = (() => {
+  const table = new Uint32Array(256);
 
-        for (let index = 0; index < 256; index += 1) {
-          let value = index;
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
 
-          for (let bit = 0; bit < 8; bit += 1) {
-            if ((value & 1) === 1) {
-              value = 0xedb88320 ^ (value >>> 1);
-            } else {
-              value >>>= 1;
-            }
-          }
+    for (let bit = 0; bit < 8; bit += 1) {
+      if ((value & 1) === 1) {
+        value = 0xedb88320 ^ (value >>> 1);
+      } else {
+        value >>>= 1;
+      }
+    }
 
-          table[index] = value >>> 0;
-        }
+    table[index] = value >>> 0;
+  }
 
-        return table;
-      })();
+  return table;
+})();
 
-      function setLoading(isLoading, message) {
-        closeButton.disabled = isLoading;
-        prepareButton.disabled = isLoading;
-        prepareButton.textContent = isLoading ? '整理中...' : '準備下載';
+function escapeHtml(text) {
+  return String(text)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
 
-        if (message) {
-          statusBox.textContent = message;
-          statusBox.classList.add('is-visible');
-        } else if (!isLoading) {
-          statusBox.classList.remove('is-visible');
-        }
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 3000);
+}
+
+function encodeText(text) {
+  return new TextEncoder().encode(text);
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+
+  for (let index = 0; index < bytes.length; index += 1) {
+    crc = crcTable[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+  }
+
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUint16(view, offset, value) {
+  view.setUint16(offset, value, true);
+}
+
+function writeUint32(view, offset, value) {
+  view.setUint32(offset, value >>> 0, true);
+}
+
+function createZipBuilder() {
+  const localChunks = [];
+  const centralEntries = [];
+  let localSize = 0;
+
+  function addEntry(path, data) {
+    const nameBytes = encodeText(path);
+    const payload = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const crc = crc32(payload);
+    const localHeader = new Uint8Array(30 + nameBytes.length);
+    const localView = new DataView(localHeader.buffer);
+
+    writeUint32(localView, 0, 0x04034b50);
+    writeUint16(localView, 4, 20);
+    writeUint16(localView, 6, 0);
+    writeUint16(localView, 8, 0);
+    writeUint16(localView, 10, 0);
+    writeUint16(localView, 12, 0);
+    writeUint32(localView, 14, crc);
+    writeUint32(localView, 18, payload.length);
+    writeUint32(localView, 22, payload.length);
+    writeUint16(localView, 26, nameBytes.length);
+    writeUint16(localView, 28, 0);
+    localHeader.set(nameBytes, 30);
+
+    localChunks.push(localHeader, payload);
+    centralEntries.push({
+      nameBytes,
+      crc,
+      size: payload.length,
+      localHeaderOffset: localSize,
+    });
+    localSize += localHeader.length + payload.length;
+  }
+
+  function buildBlob() {
+    const centralChunks = [];
+    let centralSize = 0;
+
+    centralEntries.forEach((entry) => {
+      const centralHeader = new Uint8Array(46 + entry.nameBytes.length);
+      const centralView = new DataView(centralHeader.buffer);
+
+      writeUint32(centralView, 0, 0x02014b50);
+      writeUint16(centralView, 4, 20);
+      writeUint16(centralView, 6, 20);
+      writeUint16(centralView, 8, 0);
+      writeUint16(centralView, 10, 0);
+      writeUint16(centralView, 12, 0);
+      writeUint16(centralView, 14, 0);
+      writeUint32(centralView, 16, entry.crc);
+      writeUint32(centralView, 20, entry.size);
+      writeUint32(centralView, 24, entry.size);
+      writeUint16(centralView, 28, entry.nameBytes.length);
+      writeUint16(centralView, 30, 0);
+      writeUint16(centralView, 32, 0);
+      writeUint16(centralView, 34, 0);
+      writeUint16(centralView, 36, 0);
+      writeUint32(centralView, 38, 0);
+      writeUint32(centralView, 42, entry.localHeaderOffset);
+      centralHeader.set(entry.nameBytes, 46);
+
+      centralChunks.push(centralHeader);
+      centralSize += centralHeader.length;
+    });
+
+    const endRecord = new Uint8Array(22);
+    const endView = new DataView(endRecord.buffer);
+    writeUint32(endView, 0, 0x06054b50);
+    writeUint16(endView, 4, 0);
+    writeUint16(endView, 6, 0);
+    writeUint16(endView, 8, centralEntries.length);
+    writeUint16(endView, 10, centralEntries.length);
+    writeUint32(endView, 12, centralSize);
+    writeUint32(endView, 16, localSize);
+    writeUint16(endView, 20, 0);
+
+    return new Blob(localChunks.concat(centralChunks, [endRecord]), { type: 'application/zip' });
+  }
+
+  return {
+    addEntry,
+    buildBlob,
+  };
+}
+
+function toUint8Array(value) {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+
+  if (Array.isArray(value)) {
+    return new Uint8Array(value);
+  }
+
+  return new Uint8Array(0);
+}
+
+function roundNumber(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function getBounds(node) {
+  const bounds = node.absoluteRenderBounds || node.absoluteBoundingBox;
+  if (bounds) {
+    return {
+      x: roundNumber(bounds.x),
+      y: roundNumber(bounds.y),
+      width: roundNumber(bounds.width),
+      height: roundNumber(bounds.height),
+    };
+  }
+
+  if (
+    typeof node.x === 'number'
+    && typeof node.y === 'number'
+    && typeof node.width === 'number'
+    && typeof node.height === 'number'
+  ) {
+    return {
+      x: roundNumber(node.x),
+      y: roundNumber(node.y),
+      width: roundNumber(node.width),
+      height: roundNumber(node.height),
+    };
+  }
+
+  return null;
+}
+
+function toLiteNode(node) {
+  const lite = {
+    name: node.name,
+    type: node.type,
+  };
+
+  const bounds = getBounds(node);
+  if (bounds) {
+    lite.bounds = bounds;
+  }
+
+  if (typeof node.characters === 'string' && node.characters.length > 0) {
+    lite.text = node.characters;
+  }
+
+  if (Array.isArray(node.children) && node.children.length > 0) {
+    lite.children = node.children.map((child) => toLiteNode(child));
+  }
+
+  return lite;
+}
+
+function collectTextEntries(node, path, output) {
+  const currentPath = path.concat(node.name || node.type);
+
+  if (typeof node.characters === 'string' && node.characters.length > 0) {
+    output.push({
+      id: node.id,
+      name: node.name,
+      type: node.type,
+      text: node.characters,
+      path: currentPath.join(' / '),
+      bounds: getBounds(node),
+    });
+  }
+
+  if (Array.isArray(node.children)) {
+    node.children.forEach((child) => {
+      collectTextEntries(child, currentPath, output);
+    });
+  }
+}
+
+function buildTextsJsonl(structureJson) {
+  const entries = [];
+  collectTextEntries(structureJson, [], entries);
+  return entries.map((entry) => JSON.stringify(entry)).join('\n');
+}
+
+function countTextEntries(textsJsonl) {
+  if (!textsJsonl) {
+    return 0;
+  }
+
+  return textsJsonl.split('\n').filter((line) => line.length > 0).length;
+}
+
+function loadImageFromBytes(bytes) {
+  const blob = new Blob([bytes], { type: 'image/png' });
+  const url = URL.createObjectURL(blob);
+
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('無法載入原始 PNG 影像。'));
+    };
+    image.src = url;
+  });
+}
+
+function buildStructureLite(structureJson, imageMeta, textCount) {
+  return {
+    format: 'figma-ai-content.v1',
+    image: imageMeta,
+    stats: {
+      rootCount: 1,
+      textCount,
+    },
+    roots: [toLiteNode(structureJson)],
+  };
+}
+
+function normalizeInteger(value, fallback) {
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function formatRelativeValue(value) {
+  return Number.isFinite(value) ? value.toFixed(2) : '0.00';
+}
+
+// ui/pages.js
+function createPageName(pageNumber) {
+  return 'Page' + String(pageNumber);
+}
+
+function createViewName(pageNumber, viewNumber) {
+  return createPageName(pageNumber) + '-View' + String(viewNumber);
+}
+
+function createPageStore() {
+  let currentPages = [];
+  let pageGroupSequence = 0;
+
+  function getPages() {
+    return currentPages;
+  }
+
+  function setPages(pages) {
+    currentPages = pages;
+  }
+
+  function clearPages() {
+    currentPages = [];
+  }
+
+  function createPageGroupId() {
+    pageGroupSequence += 1;
+    return 'group-' + String(pageGroupSequence);
+  }
+
+  function uniqueStrings(values) {
+    const unique = [];
+    const seen = new Set();
+
+    values.forEach((value) => {
+      if (typeof value !== 'string' || value.length === 0 || seen.has(value)) {
+        return;
       }
 
-      function escapeHtml(text) {
-        return String(text)
-          .replaceAll('&', '&amp;')
-          .replaceAll('<', '&lt;')
-          .replaceAll('>', '&gt;')
-          .replaceAll('"', '&quot;')
-          .replaceAll("'", '&#39;');
-      }
+      seen.add(value);
+      unique.push(value);
+    });
 
-      function downloadBlob(blob, fileName) {
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = fileName;
-        document.body.appendChild(anchor);
-        anchor.click();
-        document.body.removeChild(anchor);
+    return unique;
+  }
 
-        window.setTimeout(() => {
-          URL.revokeObjectURL(url);
-        }, 3000);
-      }
+  function syncPageGroup(page, fallbackLabel) {
+    page.frameNames = uniqueStrings(page.views.map((view) => view.frameName));
+    page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
+    page.pageLabel = page.views[0]?.frameName || fallbackLabel || page.pageLabel || '';
+    page.groupId = page.groupId || createPageGroupId();
+    return page;
+  }
 
-      function encodeText(text) {
-        return new TextEncoder().encode(text);
-      }
+  function renumberViewsInPage(page) {
+    page.views.forEach((view, viewIndex) => {
+      view.viewNumber = viewIndex + 1;
+    });
+    syncPageGroup(page, page.pageLabel || page.views[0]?.frameName || '');
+  }
 
-      function crc32(bytes) {
-        let crc = 0xffffffff;
+  function createPageGroupFromViews(views, pageLabel) {
+    return syncPageGroup({
+      groupId: createPageGroupId(),
+      pageNumber: 0,
+      pageLabel: pageLabel || '',
+      frameNames: [],
+      viewCount: 0,
+      views,
+    }, pageLabel || '');
+  }
 
-        for (let index = 0; index < bytes.length; index += 1) {
-          crc = crcTable[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
-        }
+  function renumberPageGroups(pages, startIndex) {
+    const safeStartIndex = Math.max(0, Math.min(
+      typeof startIndex === 'number' ? startIndex : 0,
+      Math.max(pages.length - 1, 0),
+    ));
 
-        return (crc ^ 0xffffffff) >>> 0;
-      }
-
-      function writeUint16(view, offset, value) {
-        view.setUint16(offset, value, true);
-      }
-
-      function writeUint32(view, offset, value) {
-        view.setUint32(offset, value >>> 0, true);
-      }
-
-      function createZipBuilder() {
-        const localChunks = [];
-        const centralEntries = [];
-        let localSize = 0;
-
-        function addEntry(path, data) {
-          const nameBytes = encodeText(path);
-          const payload = data instanceof Uint8Array ? data : new Uint8Array(data);
-          const crc = crc32(payload);
-          const localHeader = new Uint8Array(30 + nameBytes.length);
-          const localView = new DataView(localHeader.buffer);
-
-          writeUint32(localView, 0, 0x04034b50);
-          writeUint16(localView, 4, 20);
-          writeUint16(localView, 6, 0);
-          writeUint16(localView, 8, 0);
-          writeUint16(localView, 10, 0);
-          writeUint16(localView, 12, 0);
-          writeUint32(localView, 14, crc);
-          writeUint32(localView, 18, payload.length);
-          writeUint32(localView, 22, payload.length);
-          writeUint16(localView, 26, nameBytes.length);
-          writeUint16(localView, 28, 0);
-          localHeader.set(nameBytes, 30);
-
-          localChunks.push(localHeader, payload);
-          centralEntries.push({
-            nameBytes,
-            crc,
-            size: payload.length,
-            localHeaderOffset: localSize,
-          });
-          localSize += localHeader.length + payload.length;
-        }
-
-        function buildBlob() {
-          const centralChunks = [];
-          let centralSize = 0;
-
-          centralEntries.forEach((entry) => {
-            const centralHeader = new Uint8Array(46 + entry.nameBytes.length);
-            const centralView = new DataView(centralHeader.buffer);
-
-            writeUint32(centralView, 0, 0x02014b50);
-            writeUint16(centralView, 4, 20);
-            writeUint16(centralView, 6, 20);
-            writeUint16(centralView, 8, 0);
-            writeUint16(centralView, 10, 0);
-            writeUint16(centralView, 12, 0);
-            writeUint16(centralView, 14, 0);
-            writeUint32(centralView, 16, entry.crc);
-            writeUint32(centralView, 20, entry.size);
-            writeUint32(centralView, 24, entry.size);
-            writeUint16(centralView, 28, entry.nameBytes.length);
-            writeUint16(centralView, 30, 0);
-            writeUint16(centralView, 32, 0);
-            writeUint16(centralView, 34, 0);
-            writeUint16(centralView, 36, 0);
-            writeUint32(centralView, 38, 0);
-            writeUint32(centralView, 42, entry.localHeaderOffset);
-            centralHeader.set(entry.nameBytes, 46);
-
-            centralChunks.push(centralHeader);
-            centralSize += centralHeader.length;
-          });
-
-          const endRecord = new Uint8Array(22);
-          const endView = new DataView(endRecord.buffer);
-          writeUint32(endView, 0, 0x06054b50);
-          writeUint16(endView, 4, 0);
-          writeUint16(endView, 6, 0);
-          writeUint16(endView, 8, centralEntries.length);
-          writeUint16(endView, 10, centralEntries.length);
-          writeUint32(endView, 12, centralSize);
-          writeUint32(endView, 16, localSize);
-          writeUint16(endView, 20, 0);
-
-          return new Blob(localChunks.concat(centralChunks, [endRecord]), { type: 'application/zip' });
-        }
-
-        return {
-          addEntry,
-          buildBlob,
-        };
-      }
-
-      function toUint8Array(value) {
-        if (value instanceof Uint8Array) {
-          return value;
-        }
-
-        if (value instanceof ArrayBuffer) {
-          return new Uint8Array(value);
-        }
-
-        if (Array.isArray(value)) {
-          return new Uint8Array(value);
-        }
-
-        return new Uint8Array(0);
-      }
-
-      function roundNumber(value) {
-        return Math.round(value * 100) / 100;
-      }
-
-      function getBounds(node) {
-        const bounds = node.absoluteRenderBounds || node.absoluteBoundingBox;
-        if (bounds) {
-          return {
-            x: roundNumber(bounds.x),
-            y: roundNumber(bounds.y),
-            width: roundNumber(bounds.width),
-            height: roundNumber(bounds.height),
-          };
-        }
-
-        if (
-          typeof node.x === 'number'
-          && typeof node.y === 'number'
-          && typeof node.width === 'number'
-          && typeof node.height === 'number'
-        ) {
-          return {
-            x: roundNumber(node.x),
-            y: roundNumber(node.y),
-            width: roundNumber(node.width),
-            height: roundNumber(node.height),
-          };
-        }
-
-        return null;
-      }
-
-      function toLiteNode(node) {
-        const lite = {
-          name: node.name,
-          type: node.type,
-        };
-
-        const bounds = getBounds(node);
-        if (bounds) {
-          lite.bounds = bounds;
-        }
-
-        if (typeof node.characters === 'string' && node.characters.length > 0) {
-          lite.text = node.characters;
-        }
-
-        if (Array.isArray(node.children) && node.children.length > 0) {
-          lite.children = node.children.map((child) => toLiteNode(child));
-        }
-
-        return lite;
-      }
-
-      function collectTextEntries(node, path, output) {
-        const currentPath = path.concat(node.name || node.type);
-
-        if (typeof node.characters === 'string' && node.characters.length > 0) {
-          output.push({
-            id: node.id,
-            name: node.name,
-            type: node.type,
-            text: node.characters,
-            path: currentPath.join(' / '),
-            bounds: getBounds(node),
-          });
-        }
-
-        if (Array.isArray(node.children)) {
-          node.children.forEach((child) => {
-            collectTextEntries(child, currentPath, output);
-          });
-        }
-      }
-
-      function buildTextsJsonl(structureJson) {
-        const entries = [];
-        collectTextEntries(structureJson, [], entries);
-        return entries.map((entry) => JSON.stringify(entry)).join('\n');
-      }
-
-      function countTextEntries(textsJsonl) {
-        if (!textsJsonl) {
-          return 0;
-        }
-
-        return textsJsonl.split('\n').filter((line) => line.length > 0).length;
-      }
-
-      function loadImageFromBytes(bytes) {
-        const blob = new Blob([bytes], { type: 'image/png' });
-        const url = URL.createObjectURL(blob);
-
-        return new Promise((resolve, reject) => {
-          const image = new Image();
-          image.onload = () => {
-            URL.revokeObjectURL(url);
-            resolve(image);
-          };
-          image.onerror = () => {
-            URL.revokeObjectURL(url);
-            reject(new Error('無法載入原始 PNG 影像。'));
-          };
-          image.src = url;
-        });
-      }
-
-      function buildStructureLite(structureJson, imageMeta, textCount) {
-        return {
-          format: 'figma-ai-content.v1',
-          image: imageMeta,
-          stats: {
-            rootCount: 1,
-            textCount,
-          },
-          roots: [toLiteNode(structureJson)],
-        };
-      }
-
-      function createPageName(pageNumber) {
-        return 'Page' + String(pageNumber);
-      }
-
-      function createViewName(pageNumber, viewNumber) {
-        return createPageName(pageNumber) + '-View' + String(viewNumber);
-      }
-
-      function createPageGroupId() {
-        pageGroupSequence += 1;
-        return 'group-' + String(pageGroupSequence);
-      }
-
-      function uniqueStrings(values) {
-        const unique = [];
-        const seen = new Set();
-
-        values.forEach((value) => {
-          if (typeof value !== 'string' || value.length === 0 || seen.has(value)) {
-            return;
-          }
-
-          seen.add(value);
-          unique.push(value);
-        });
-
-        return unique;
-      }
-
-      function syncPageGroup(page, fallbackLabel) {
-        page.frameNames = uniqueStrings(page.views.map((view) => view.frameName));
+    pages.forEach((page, pageIndex) => {
+      if (pageIndex < safeStartIndex && Number.isInteger(page.pageNumber) && page.pageNumber > 0) {
         page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
-        page.pageLabel = page.views[0]?.frameName || fallbackLabel || page.pageLabel || '';
-        page.groupId = page.groupId || createPageGroupId();
-        return page;
+        return;
       }
 
-      function renumberViewsInPage(page) {
-        page.views.forEach((view, viewIndex) => {
-          view.viewNumber = viewIndex + 1;
-        });
-        syncPageGroup(page, page.pageLabel || page.views[0]?.frameName || '');
+      page.pageNumber = pageIndex + 1;
+      page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
+    });
+  }
+
+  function cloneSelectionPages(pages) {
+    if (!Array.isArray(pages)) {
+      return [];
+    }
+
+    const clonedPages = pages.map((page, pageIndex) => {
+      const views = Array.isArray(page?.views)
+        ? page.views.map((view, viewIndex) => ({
+          viewNumber: normalizeInteger(view?.viewNumber, viewIndex + 1),
+          frameId: typeof view?.frameId === 'string' ? view.frameId : '',
+          frameName: typeof view?.frameName === 'string' ? view.frameName : '',
+          bounds: view?.bounds || {},
+          relativeTopLeft: view?.relativeTopLeft || { x: 0, y: 0 },
+          primaryTextLabel: typeof view?.primaryTextLabel === 'string' ? view.primaryTextLabel : '',
+        }))
+        : [];
+      const frameNames = Array.isArray(page?.frameNames) && page.frameNames.length
+        ? uniqueStrings(page.frameNames)
+        : uniqueStrings(views.map((view) => view.frameName));
+      return syncPageGroup({
+        groupId: createPageGroupId(),
+        pageNumber: pageIndex + 1,
+        pageLabel: typeof page?.pageLabel === 'string' ? page.pageLabel : '',
+        frameNames,
+        viewCount: views.length,
+        views,
+      }, typeof page?.pageLabel === 'string' ? page.pageLabel : '');
+    });
+
+    renumberPageGroups(clonedPages);
+    return clonedPages;
+  }
+
+  function findViewByFrameId(frameId) {
+    for (const page of currentPages) {
+      const matchedView = page.views.find((view) => view.frameId === frameId);
+      if (matchedView) {
+        return matchedView;
+      }
+    }
+
+    return null;
+  }
+
+  function findViewLocation(frameId) {
+    for (let pageIndex = 0; pageIndex < currentPages.length; pageIndex += 1) {
+      const viewIndex = currentPages[pageIndex].views.findIndex((view) => view.frameId === frameId);
+      if (viewIndex >= 0) {
+        return {
+          pageIndex,
+          viewIndex,
+          page: currentPages[pageIndex],
+          view: currentPages[pageIndex].views[viewIndex],
+        };
+      }
+    }
+
+    return null;
+  }
+
+  function relocateViewByPageNumber(frameId, rawPageNumber) {
+    const location = findViewLocation(frameId);
+    if (!location) {
+      return;
+    }
+
+    const currentPageNumber = location.page.pageNumber;
+    const targetPageNumber = normalizeInteger(rawPageNumber, currentPageNumber);
+    if (targetPageNumber === currentPageNumber) {
+      return;
+    }
+
+    const fallbackLabel = location.page.pageLabel || location.page.views[0]?.frameName || '';
+    const [movedView] = location.page.views.splice(location.viewIndex, 1);
+    const pageRemoved = location.page.views.length === 0;
+
+    if (pageRemoved) {
+      currentPages.splice(location.pageIndex, 1);
+    } else {
+      renumberViewsInPage(location.page);
+    }
+
+    if (targetPageNumber < currentPageNumber) {
+      const targetIndex = Math.max(0, Math.min(currentPages.length - 1, targetPageNumber - 1));
+      const targetPage = currentPages[targetIndex];
+      if (!targetPage) {
+        return;
       }
 
-      function createPageGroupFromViews(views, pageLabel) {
-        return syncPageGroup({
-          groupId: createPageGroupId(),
-          pageNumber: 0,
-          pageLabel: pageLabel || '',
-          frameNames: [],
-          viewCount: 0,
-          views,
-        }, pageLabel || '');
+      targetPage.views.push(movedView);
+      renumberViewsInPage(targetPage);
+
+      if (pageRemoved) {
+        renumberPageGroups(currentPages, location.pageIndex);
       }
+      return;
+    }
 
-      function renumberPageGroups(pages, startIndex) {
-        const safeStartIndex = Math.max(0, Math.min(
-          typeof startIndex === 'number' ? startIndex : 0,
-          Math.max(pages.length - 1, 0),
-        ));
+    const standalonePage = createPageGroupFromViews([movedView], movedView.frameName || fallbackLabel);
+    renumberViewsInPage(standalonePage);
 
-        pages.forEach((page, pageIndex) => {
-          if (pageIndex < safeStartIndex && Number.isInteger(page.pageNumber) && page.pageNumber > 0) {
-            page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
-            return;
-          }
+    const insertIndex = Math.max(0, Math.min(currentPages.length, targetPageNumber - 1));
+    currentPages.splice(insertIndex, 0, standalonePage);
+    renumberPageGroups(currentPages, insertIndex);
+  }
 
-          page.pageNumber = pageIndex + 1;
-          page.viewCount = Array.isArray(page.views) ? page.views.length : 0;
-        });
-      }
+  function updateViewNumber(frameId, rawValue) {
+    const view = findViewByFrameId(frameId);
+    if (!view) {
+      return;
+    }
 
-      function cloneSelectionPages(pages) {
-        if (!Array.isArray(pages)) {
-          return [];
+    view.viewNumber = normalizeInteger(rawValue, view.viewNumber);
+  }
+
+  function collectOverrides() {
+    if (!currentPages.length) {
+      return [];
+    }
+
+    const seen = new Set();
+
+    return currentPages.flatMap((page) => {
+      return page.views.map((view) => {
+        const pageNumber = normalizeInteger(page.pageNumber, 1);
+        const viewNumber = normalizeInteger(view.viewNumber, 1);
+        const duplicateKey = String(pageNumber) + ':' + String(viewNumber);
+
+        if (seen.has(duplicateKey)) {
+          throw new Error(`Page${String(pageNumber)} / View${String(viewNumber)} 重複，請調整編號。`);
         }
 
-        const clonedPages = pages.map((page, pageIndex) => {
-          const views = Array.isArray(page?.views)
-            ? page.views.map((view, viewIndex) => ({
-              viewNumber: normalizeInteger(view?.viewNumber, viewIndex + 1),
-              frameId: typeof view?.frameId === 'string' ? view.frameId : '',
-              frameName: typeof view?.frameName === 'string' ? view.frameName : '',
-              bounds: view?.bounds || {},
-              relativeTopLeft: view?.relativeTopLeft || { x: 0, y: 0 },
-              primaryTextLabel: typeof view?.primaryTextLabel === 'string' ? view.primaryTextLabel : '',
-            }))
-            : [];
-          const frameNames = Array.isArray(page?.frameNames) && page.frameNames.length
-            ? uniqueStrings(page.frameNames)
-            : uniqueStrings(views.map((view) => view.frameName));
-          return syncPageGroup({
-            groupId: createPageGroupId(),
-            pageNumber: pageIndex + 1,
-            pageLabel: typeof page?.pageLabel === 'string' ? page.pageLabel : '',
-            frameNames,
-            viewCount: views.length,
-            views,
-          }, typeof page?.pageLabel === 'string' ? page.pageLabel : '');
-        });
+        seen.add(duplicateKey);
 
-        renumberPageGroups(clonedPages);
-        return clonedPages;
-      }
+        return {
+          frameId: view.frameId,
+          pageNumber,
+          viewNumber,
+        };
+      });
+    });
+  }
 
-      function findViewByFrameId(frameId) {
-        for (const page of currentPages) {
-          const matchedView = page.views.find((view) => view.frameId === frameId);
-          if (matchedView) {
-            return matchedView;
-          }
-        }
+  return {
+    getPages,
+    setPages,
+    clearPages,
+    cloneSelectionPages,
+    findViewByFrameId,
+    findViewLocation,
+    relocateViewByPageNumber,
+    updateViewNumber,
+    collectOverrides,
+  };
+}
 
-        return null;
-      }
+// ui/exporters.js
+function createPagedIndexHtml(payload, manifestPages, totalViewCount) {
+  const pageSections = manifestPages.map((page) => {
+    const viewsHtml = page.views.map((view) => {
+      const bounds = view.bounds || {};
+      const relativeTopLeft = view.relativeTopLeft || {};
+      const imagePath = escapeHtml(view.path + '/image.png');
+      const litePath = escapeHtml(view.path + '/structure-lite.json');
+      const textsPath = escapeHtml(view.path + '/texts.jsonl');
 
-      function findViewLocation(frameId) {
-        for (let pageIndex = 0; pageIndex < currentPages.length; pageIndex += 1) {
-          const viewIndex = currentPages[pageIndex].views.findIndex((view) => view.frameId === frameId);
-          if (viewIndex >= 0) {
-            return {
-              pageIndex,
-              viewIndex,
-              page: currentPages[pageIndex],
-              view: currentPages[pageIndex].views[viewIndex],
-            };
-          }
-        }
+      return ''
+        + '<article class="view-card">'
+        + '<div class="view-meta">'
+        + '<div class="view-title">' + escapeHtml(view.name) + '</div>'
+        + '<div class="view-subtitle">' + escapeHtml(view.frameName || '') + '</div>'
+        + '<div class="view-lines">'
+        + '<div>bounds: x=' + escapeHtml(String(bounds.x ?? 0)) + ', y=' + escapeHtml(String(bounds.y ?? 0))
+        + ', w=' + escapeHtml(String(bounds.width ?? 0)) + ', h=' + escapeHtml(String(bounds.height ?? 0)) + '</div>'
+        + '<div>relativeTopLeft: x=' + escapeHtml(formatRelativeValue(relativeTopLeft.x))
+        + ', y=' + escapeHtml(formatRelativeValue(relativeTopLeft.y)) + '</div>'
+        + '</div>'
+        + '<div class="view-links">'
+        + '<a href="' + imagePath + '">image</a>'
+        + '<a href="' + litePath + '">structure-lite</a>'
+        + '<a href="' + textsPath + '">texts</a>'
+        + '</div>'
+        + '</div>'
+        + '<img src="' + imagePath + '" alt="' + escapeHtml(view.name) + '" loading="lazy" />'
+        + '</article>';
+    }).join('');
 
-        return null;
-      }
+    return ''
+      + '<section class="page-section">'
+      + '<div class="page-head">'
+      + '<h2>' + escapeHtml(page.name) + '</h2>'
+      + '<div class="page-label">' + escapeHtml(page.label || page.name) + '</div>'
+      + '<div class="page-summary">' + escapeHtml(String(page.viewCount)) + ' views</div>'
+      + '</div>'
+      + '<div class="view-grid">' + viewsHtml + '</div>'
+      + '</section>';
+  }).join('');
 
-      function relocateViewByPageNumber(frameId, rawPageNumber) {
-        const location = findViewLocation(frameId);
-        if (!location) {
-          return;
-        }
+  return ''
+    + '<!doctype html>'
+    + '<html lang="zh-Hant">'
+    + '<head>'
+    + '<meta charset="utf-8" />'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+    + '<title>' + escapeHtml(payload.containerName) + ' - Export Index</title>'
+    + '<style>'
+    + ':root{color-scheme:light;font-family:"SF Pro Text","Noto Sans TC",sans-serif;background:#f6efe3;color:#2d241d;}'
+    + '*{box-sizing:border-box;}'
+    + 'body{margin:0;padding:32px;background:linear-gradient(180deg,#f8f2e8 0%,#efe3d0 100%);}'
+    + 'main{max-width:1400px;margin:0 auto;}'
+    + 'h1,h2,p{margin:0;}'
+    + '.hero{padding:28px 32px;border-radius:24px;background:rgba(255,255,255,0.72);box-shadow:0 20px 60px rgba(83,57,24,0.12);backdrop-filter:blur(8px);}'
+    + '.hero h1{font-size:36px;line-height:1.1;margin-bottom:10px;}'
+    + '.hero p{font-size:16px;line-height:1.6;color:#5c4737;}'
+    + '.stats{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;}'
+    + '.chip{padding:10px 14px;border-radius:999px;background:#fff7ef;border:1px solid rgba(126,86,42,0.16);font-size:14px;}'
+    + '.page-section{margin-top:28px;padding:24px;border-radius:24px;background:rgba(255,255,255,0.78);box-shadow:0 14px 40px rgba(83,57,24,0.1);}'
+    + '.page-head{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline;margin-bottom:18px;}'
+    + '.page-head h2{font-size:24px;}'
+    + '.page-label,.page-summary{color:#6b5646;font-size:14px;}'
+    + '.view-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;}'
+    + '.view-card{display:flex;flex-direction:column;gap:14px;padding:16px;border-radius:18px;background:#fffaf4;border:1px solid rgba(126,86,42,0.12);}'
+    + '.view-title{font-size:18px;font-weight:700;}'
+    + '.view-subtitle{font-size:14px;color:#7f6147;}'
+    + '.view-lines{margin-top:8px;font-size:13px;line-height:1.5;color:#5d4838;}'
+    + '.view-links{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;}'
+    + '.view-links a{color:#8f5c29;text-decoration:none;font-size:13px;font-weight:600;}'
+    + '.view-links a:hover{text-decoration:underline;}'
+    + 'img{width:100%;height:auto;border-radius:14px;border:1px solid rgba(126,86,42,0.1);background:#fff;}'
+    + '@media (max-width: 720px){body{padding:16px;}.hero,.page-section{padding:18px;}.hero h1{font-size:28px;}}'
+    + '</style>'
+    + '</head>'
+    + '<body>'
+    + '<main>'
+    + '<section class="hero">'
+    + '<h1>' + escapeHtml(payload.containerName) + '</h1>'
+    + '<p>這份 index.html 會列出所有 Page/View 的圖片與主要資訊，方便直接用瀏覽器快速檢視。</p>'
+    + '<div class="stats">'
+    + '<div class="chip">Pages: ' + escapeHtml(String(manifestPages.length)) + '</div>'
+    + '<div class="chip">Views: ' + escapeHtml(String(totalViewCount)) + '</div>'
+    + '<div class="chip">Ignored top-level nodes: ' + escapeHtml(String(payload.ignoredNodes.count)) + '</div>'
+    + '</div>'
+    + '</section>'
+    + pageSections
+    + '</main>'
+    + '</body>'
+    + '</html>';
+}
 
-        const currentPageNumber = location.page.pageNumber;
-        const targetPageNumber = normalizeInteger(rawPageNumber, currentPageNumber);
-        if (targetPageNumber === currentPageNumber) {
-          renderPagesList();
-          return;
-        }
+function createAllInOneIndexHtml(payload) {
+  const pageSummary = payload.pages.map((page) => {
+    const viewList = page.views.map((view) => {
+      return '<li>'
+        + escapeHtml(createViewName(page.pageNumber, view.viewNumber))
+        + ' - ' + escapeHtml(view.frameName || '')
+        + ' (x=' + escapeHtml(formatRelativeValue(view.relativeTopLeft?.x))
+        + ', y=' + escapeHtml(formatRelativeValue(view.relativeTopLeft?.y)) + ')'
+        + '</li>';
+    }).join('');
 
-        const fallbackLabel = location.page.pageLabel || location.page.views[0]?.frameName || '';
-        const [movedView] = location.page.views.splice(location.viewIndex, 1);
-        const pageRemoved = location.page.views.length === 0;
+    return ''
+      + '<section class="page-section">'
+      + '<h2>' + escapeHtml(createPageName(page.pageNumber)) + ' - ' + escapeHtml(page.pageLabel || '') + '</h2>'
+      + '<ul>' + viewList + '</ul>'
+      + '</section>';
+  }).join('');
 
-        if (pageRemoved) {
-          currentPages.splice(location.pageIndex, 1);
-        } else {
-          renumberViewsInPage(location.page);
-        }
+  return ''
+    + '<!doctype html>'
+    + '<html lang="zh-Hant">'
+    + '<head>'
+    + '<meta charset="utf-8" />'
+    + '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+    + '<title>' + escapeHtml(payload.containerName) + ' - All in one</title>'
+    + '<style>'
+    + 'body{margin:0;padding:24px;font-family:"SF Pro Text","Noto Sans TC",sans-serif;background:#f7efe3;color:#2f241c;}'
+    + 'main{max-width:1200px;margin:0 auto;}'
+    + '.hero,.page-section{background:#fffaf3;border:1px solid rgba(120,84,44,0.12);border-radius:20px;padding:20px;box-shadow:0 12px 30px rgba(80,56,27,0.08);}'
+    + '.page-section{margin-top:18px;}'
+    + 'img{display:block;width:100%;height:auto;border-radius:14px;border:1px solid rgba(120,84,44,0.12);margin-top:16px;background:#fff;}'
+    + 'a{color:#8f5c29;text-decoration:none;font-weight:600;}'
+    + 'a:hover{text-decoration:underline;}'
+    + 'ul{margin:12px 0 0;padding-left:20px;}'
+    + 'li{margin:6px 0;line-height:1.5;}'
+    + '</style>'
+    + '</head>'
+    + '<body>'
+    + '<main>'
+    + '<section class="hero">'
+    + '<h1>' + escapeHtml(payload.containerName) + '</h1>'
+    + '<p>這份 ZIP 是 All in one 模式，包含整個容器的 1 份 structure.json 與 1 張 image.png。</p>'
+    + '<p><a href="structure.json">Open structure.json</a></p>'
+    + '<img src="image.png" alt="' + escapeHtml(payload.containerName) + '" />'
+    + '</section>'
+    + pageSummary
+    + '</main>'
+    + '</body>'
+    + '</html>';
+}
 
-        if (targetPageNumber < currentPageNumber) {
-          const targetIndex = Math.max(0, Math.min(currentPages.length - 1, targetPageNumber - 1));
-          const targetPage = currentPages[targetIndex];
-          if (!targetPage) {
-            return;
-          }
+function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
+  const header = mode === 'paged'
+    ? '# Figma AI Pack - Page/View Export'
+    : '# Figma AI Pack - All in one Export';
 
-          targetPage.views.push(movedView);
-          renumberViewsInPage(targetPage);
+  const summary = [
+    '- source container: ' + String(payload.containerName || ''),
+    '- mode: ' + (mode === 'paged' ? 'Page/View' : 'All in one'),
+    '- exported at: ' + new Date().toISOString(),
+  ];
 
-          if (pageRemoved) {
-            renumberPageGroups(currentPages, location.pageIndex);
-          }
-        } else {
-          const standalonePage = createPageGroupFromViews([movedView], movedView.frameName || fallbackLabel);
-          renumberViewsInPage(standalonePage);
+  const modeSpecific = mode === 'paged'
+    ? [
+      '## 建議閱讀順序',
+      '1. manifest.json',
+      '2. index.html',
+      '3. pages/PageX/page.json',
+      '4. pages/PageX/views/PageX-ViewY/{structure-lite.json,texts.jsonl,image.png}',
+      '',
+      '## 匯出摘要',
+      '- page count: ' + String(pageCount),
+      '- view count: ' + String(totalViewCount),
+    ]
+    : [
+      '## 建議閱讀順序',
+      '1. structure.json',
+      '2. image.png',
+      '3. index.html',
+      '',
+      '## 匯出摘要',
+      '- page count: ' + String(pageCount),
+      '- view count: ' + String(totalViewCount),
+    ];
 
-          const insertIndex = Math.max(0, Math.min(currentPages.length, targetPageNumber - 1));
-          currentPages.splice(insertIndex, 0, standalonePage);
-          renumberPageGroups(currentPages, insertIndex);
-        }
+  return [
+    header,
+    '',
+    '這份 README 會說明此 ZIP 的模式與檔案用途，方便離線交接。',
+    '',
+    '## 基本資訊',
+    ...summary,
+    '',
+    ...modeSpecific,
+    '',
+    '## 主要檔案用途',
+    '- index.html: 快速視覺預覽',
+    '- structure-lite.json: 給 AI/前端生成的精簡語意結構（Page/View）',
+    '- texts.jsonl: 文字索引（保留 id）',
+    '- structure.json: 完整結構（All in one）',
+  ].join('\n');
+}
 
-        renderPagesList();
-        updatePickerSummary();
-      }
+async function buildViewBundle(viewPayload) {
+  const sourcePngBytes = toUint8Array(viewPayload.pngBytes);
+  const sourceImage = await loadImageFromBytes(sourcePngBytes);
+  const textsJsonl = buildTextsJsonl(viewPayload.structureJson);
+  const textCount = countTextEntries(textsJsonl);
+  const imageMeta = {
+    path: 'image.png',
+    width: sourceImage.width,
+    height: sourceImage.height,
+    sourceScale: 1,
+  };
+  const structureLite = buildStructureLite(viewPayload.structureJson, imageMeta, textCount);
 
-      function updateViewNumber(frameId, rawValue) {
-        const view = findViewByFrameId(frameId);
-        if (!view) {
-          return;
-        }
+  return {
+    imageMeta,
+    structureLite,
+    textsJsonl,
+    textCount,
+    imageWidth: sourceImage.width,
+    imageHeight: sourceImage.height,
+    imageBytes: sourcePngBytes,
+  };
+}
 
-        view.viewNumber = normalizeInteger(rawValue, view.viewNumber);
-        renderPagesList();
-      }
+async function appendPagedZipPage(session, page, setLoading) {
+  const pageName = createPageName(page.pageNumber);
+  const pageDir = 'pages/' + pageName;
+  const pageViews = [];
 
-      function createPagedIndexHtml(payload, manifestPages, totalViewCount) {
-        const pageSections = manifestPages.map((page) => {
-          const viewsHtml = page.views.map((view) => {
-            const bounds = view.bounds || {};
-            const relativeTopLeft = view.relativeTopLeft || {};
-            const imagePath = escapeHtml(view.path + '/image.png');
-            const litePath = escapeHtml(view.path + '/structure-lite.json');
-            const textsPath = escapeHtml(view.path + '/texts.jsonl');
+  for (const view of page.views) {
+    const viewName = createViewName(page.pageNumber, view.viewNumber);
+    const viewDir = pageDir + '/views/' + viewName;
 
-            return ''
-              + '<article class="view-card">'
-              + '<div class="view-meta">'
-              + '<div class="view-title">' + escapeHtml(view.name) + '</div>'
-              + '<div class="view-subtitle">' + escapeHtml(view.frameName || '') + '</div>'
-              + '<div class="view-lines">'
-              + '<div>bounds: x=' + escapeHtml(String(bounds.x ?? 0)) + ', y=' + escapeHtml(String(bounds.y ?? 0))
-              + ', w=' + escapeHtml(String(bounds.width ?? 0)) + ', h=' + escapeHtml(String(bounds.height ?? 0)) + '</div>'
-              + '<div>relativeTopLeft: x=' + escapeHtml(formatRelativeValue(relativeTopLeft.x))
-              + ', y=' + escapeHtml(formatRelativeValue(relativeTopLeft.y)) + '</div>'
-              + '</div>'
-              + '<div class="view-links">'
-              + '<a href="' + imagePath + '">image</a>'
-              + '<a href="' + litePath + '">structure-lite</a>'
-              + '<a href="' + textsPath + '">texts</a>'
-              + '</div>'
-              + '</div>'
-              + '<img src="' + imagePath + '" alt="' + escapeHtml(view.name) + '" loading="lazy" />'
-              + '</article>';
-          }).join('');
+    setLoading(true, '正在整理 ' + pageName + ' / View' + String(view.viewNumber) + '...');
 
-          return ''
-            + '<section class="page-section">'
-            + '<div class="page-head">'
-            + '<h2>' + escapeHtml(page.name) + '</h2>'
-            + '<div class="page-label">' + escapeHtml(page.label || page.name) + '</div>'
-            + '<div class="page-summary">' + escapeHtml(String(page.viewCount)) + ' views</div>'
-            + '</div>'
-            + '<div class="view-grid">' + viewsHtml + '</div>'
-            + '</section>';
-        }).join('');
+    const viewBundle = await buildViewBundle(view);
+
+    session.zipBuilder.addEntry(
+      viewDir + '/structure-lite.json',
+      encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
+    );
+    session.zipBuilder.addEntry(
+      viewDir + '/texts.jsonl',
+      encodeText(viewBundle.textsJsonl),
+    );
+    session.zipBuilder.addEntry(viewDir + '/image.png', viewBundle.imageBytes);
+
+    pageViews.push({
+      viewNumber: view.viewNumber,
+      name: viewName,
+      frameId: view.frameId,
+      frameName: view.frameName,
+      bounds: view.bounds,
+      relativeTopLeft: view.relativeTopLeft,
+      path: viewDir,
+      image: {
+        width: viewBundle.imageWidth,
+        height: viewBundle.imageHeight,
+        path: viewDir + '/image.png',
+      },
+      textCount: viewBundle.textCount,
+    });
+  }
+
+  const pageJson = {
+    format: 'figma-ai-page.v1',
+    source: {
+      containerId: session.containerId,
+      containerName: session.containerName,
+    },
+    pageNumber: page.pageNumber,
+    name: pageName,
+    label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
+    viewCount: pageViews.length,
+    frameNames: Array.isArray(page.frameNames) && page.frameNames.length
+      ? page.frameNames
+      : pageViews.map((view) => view.frameName),
+    views: pageViews,
+  };
+
+  session.zipBuilder.addEntry(
+    pageDir + '/page.json',
+    encodeText(JSON.stringify(pageJson, null, 2)),
+  );
+
+  session.manifestPages.push({
+    pageNumber: page.pageNumber,
+    name: pageName,
+    label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
+    viewCount: pageViews.length,
+    frameNames: Array.isArray(page.frameNames) && page.frameNames.length
+      ? page.frameNames
+      : pageViews.map((view) => view.frameName),
+    views: pageViews.map((view) => ({
+      viewNumber: view.viewNumber,
+      name: view.name,
+      frameId: view.frameId,
+      frameName: view.frameName,
+      bounds: view.bounds,
+      relativeTopLeft: view.relativeTopLeft,
+      path: view.path,
+    })),
+  });
+
+  session.totalViewCount += pageViews.length;
+  session.receivedPages += 1;
+}
+
+function finalizePagedZipSession(session) {
+  const manifest = {
+    format: 'figma-ai-pack.v2',
+    source: {
+      id: session.containerId,
+      name: session.containerName,
+    },
+    pageCount: session.manifestPages.length,
+    totalViewCount: session.totalViewCount,
+    ignoredNodeCount: session.ignoredNodes.count,
+    ignoredNodes: session.ignoredNodes.items,
+    pages: session.manifestPages,
+  };
+
+  session.zipBuilder.addEntry('manifest.json', encodeText(JSON.stringify(manifest, null, 2)));
+  session.zipBuilder.addEntry(
+    'index.html',
+    encodeText(createPagedIndexHtml(session, session.manifestPages, session.totalViewCount)),
+  );
+  session.zipBuilder.addEntry(
+    'README.md',
+    encodeText(createExportReadmeMarkdown('paged', session, session.manifestPages.length, session.totalViewCount)),
+  );
+
+  return {
+    blob: session.zipBuilder.buildBlob(),
+    fileName: 'figma-ai-pack-' + session.fileName + '.zip',
+    pageCount: session.manifestPages.length,
+    totalViewCount: session.totalViewCount,
+  };
+}
+
+async function buildAllInOneZipPayload(payload) {
+  const containerPngBytes = toUint8Array(payload.containerPngBytes);
+  const containerImage = await loadImageFromBytes(containerPngBytes);
+  const allInOneJson = {
+    format: 'figma-ai-all-in-one.v1',
+    source: {
+      id: payload.containerId,
+      name: payload.containerName,
+    },
+    image: {
+      path: 'image.png',
+      width: containerImage.width,
+      height: containerImage.height,
+      sourceScale: 1,
+    },
+    ignoredNodeCount: payload.ignoredNodes.count,
+    ignoredNodes: payload.ignoredNodes.items,
+    pages: payload.pages.map((page) => ({
+      pageNumber: page.pageNumber,
+      pageLabel: page.pageLabel,
+      frameNames: page.frameNames,
+      views: page.views.map((view) => ({
+        viewNumber: view.viewNumber,
+        frameId: view.frameId,
+        frameName: view.frameName,
+        bounds: view.bounds,
+        relativeTopLeft: view.relativeTopLeft,
+      })),
+    })),
+    structure: payload.containerStructureJson,
+  };
+
+  const zipBuilder = createZipBuilder();
+  zipBuilder.addEntry('index.html', encodeText(createAllInOneIndexHtml(payload)));
+  zipBuilder.addEntry('structure.json', encodeText(JSON.stringify(allInOneJson, null, 2)));
+  zipBuilder.addEntry('image.png', containerPngBytes);
+  zipBuilder.addEntry(
+    'README.md',
+    encodeText(
+      createExportReadmeMarkdown(
+        'all-in-one',
+        payload,
+        Array.isArray(payload.pages) ? payload.pages.length : 0,
+        Array.isArray(payload.pages)
+          ? payload.pages.reduce((sum, page) => sum + (Array.isArray(page.views) ? page.views.length : 0), 0)
+          : 0,
+      ),
+    ),
+  );
+
+  return {
+    blob: zipBuilder.buildBlob(),
+    fileName: 'figma-ai-pack-' + payload.fileName + '-all-in-one.zip',
+  };
+}
+
+function createZipSession(msg) {
+  return {
+    exportMode: msg.exportMode,
+    containerId: msg.containerId,
+    containerName: msg.containerName,
+    ignoredNodes: msg.ignoredNodes,
+    fileName: msg.fileName,
+    totalPages: Number(msg.totalPages || 0),
+    manifestPages: [],
+    totalViewCount: 0,
+    receivedPages: 0,
+    zipBuilder: msg.exportMode === 'paged' ? createZipBuilder() : null,
+  };
+}
+
+// ui/app.js
+const selectionInfo = document.getElementById('selection-info');
+const closeButton = document.getElementById('close-button');
+const prepareButton = document.getElementById('prepare-button');
+const statusBox = document.getElementById('status');
+const pickerNote = document.getElementById('picker-note');
+const pagesListContent = document.getElementById('pages-list-content');
+const exportModeInputs = Array.from(document.querySelectorAll('input[name="export-mode"]'));
+
+const pageStore = createPageStore();
+let activeZipSession = null;
+
+function setLoading(isLoading, message) {
+  closeButton.disabled = isLoading;
+  prepareButton.disabled = isLoading;
+  prepareButton.textContent = isLoading ? '整理中...' : '準備下載';
+
+  if (message) {
+    statusBox.textContent = message;
+    statusBox.classList.add('is-visible');
+  } else if (!isLoading) {
+    statusBox.classList.remove('is-visible');
+  }
+}
+
+function renderPagesList() {
+  const currentPages = pageStore.getPages();
+
+  if (!currentPages.length) {
+    pagesListContent.textContent = '目前沒有可用的 Page / View。';
+    return;
+  }
+
+  const items = currentPages.map((page) => {
+    const pageTitle = escapeHtml(
+      page.pageLabel
+      || (Array.isArray(page.frameNames) ? page.frameNames[0] : '')
+      || createPageName(page.pageNumber),
+    );
+    const frameNames = Array.isArray(page.frameNames) && page.frameNames.length
+      ? '<div class="view-frame-names">Frame Names: ' + escapeHtml(page.frameNames.join(' / ')) + '</div>'
+      : '';
+    const views = page.views
+      .map((view) => {
+        const relativeX = formatRelativeValue(view.relativeTopLeft?.x);
+        const relativeY = formatRelativeValue(view.relativeTopLeft?.y);
+        const primaryTextLabel = typeof view.primaryTextLabel === 'string' && view.primaryTextLabel.length > 0
+          ? '<div class="view-primary-text">' + escapeHtml(view.primaryTextLabel) + '</div>'
+          : '';
 
         return ''
-          + '<!doctype html>'
-          + '<html lang="zh-Hant">'
-          + '<head>'
-          + '<meta charset="utf-8" />'
-          + '<meta name="viewport" content="width=device-width, initial-scale=1" />'
-          + '<title>' + escapeHtml(payload.containerName) + ' - Export Index</title>'
-          + '<style>'
-          + ':root{color-scheme:light;font-family:"SF Pro Text","Noto Sans TC",sans-serif;background:#f6efe3;color:#2d241d;}'
-          + '*{box-sizing:border-box;}'
-          + 'body{margin:0;padding:32px;background:linear-gradient(180deg,#f8f2e8 0%,#efe3d0 100%);}'
-          + 'main{max-width:1400px;margin:0 auto;}'
-          + 'h1,h2,p{margin:0;}'
-          + '.hero{padding:28px 32px;border-radius:24px;background:rgba(255,255,255,0.72);box-shadow:0 20px 60px rgba(83,57,24,0.12);backdrop-filter:blur(8px);}'
-          + '.hero h1{font-size:36px;line-height:1.1;margin-bottom:10px;}'
-          + '.hero p{font-size:16px;line-height:1.6;color:#5c4737;}'
-          + '.stats{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px;}'
-          + '.chip{padding:10px 14px;border-radius:999px;background:#fff7ef;border:1px solid rgba(126,86,42,0.16);font-size:14px;}'
-          + '.page-section{margin-top:28px;padding:24px;border-radius:24px;background:rgba(255,255,255,0.78);box-shadow:0 14px 40px rgba(83,57,24,0.1);}'
-          + '.page-head{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline;margin-bottom:18px;}'
-          + '.page-head h2{font-size:24px;}'
-          + '.page-label,.page-summary{color:#6b5646;font-size:14px;}'
-          + '.view-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;}'
-          + '.view-card{display:flex;flex-direction:column;gap:14px;padding:16px;border-radius:18px;background:#fffaf4;border:1px solid rgba(126,86,42,0.12);}'
-          + '.view-title{font-size:18px;font-weight:700;}'
-          + '.view-subtitle{font-size:14px;color:#7f6147;}'
-          + '.view-lines{margin-top:8px;font-size:13px;line-height:1.5;color:#5d4838;}'
-          + '.view-links{display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;}'
-          + '.view-links a{color:#8f5c29;text-decoration:none;font-size:13px;font-weight:600;}'
-          + '.view-links a:hover{text-decoration:underline;}'
-          + 'img{width:100%;height:auto;border-radius:14px;border:1px solid rgba(126,86,42,0.1);background:#fff;}'
-          + '@media (max-width: 720px){body{padding:16px;}.hero,.page-section{padding:18px;}.hero h1{font-size:28px;}}'
-          + '</style>'
-          + '</head>'
-          + '<body>'
-          + '<main>'
-          + '<section class="hero">'
-          + '<h1>' + escapeHtml(payload.containerName) + '</h1>'
-          + '<p>這份 index.html 會列出所有 Page/View 的圖片與主要資訊，方便直接用瀏覽器快速檢視。</p>'
-          + '<div class="stats">'
-          + '<div class="chip">Pages: ' + escapeHtml(String(manifestPages.length)) + '</div>'
-          + '<div class="chip">Views: ' + escapeHtml(String(totalViewCount)) + '</div>'
-          + '<div class="chip">Ignored top-level nodes: ' + escapeHtml(String(payload.ignoredNodes.count)) + '</div>'
+          + '<div class="view-card" data-frame-id="' + escapeHtml(view.frameId) + '">'
+          + '<div class="view-head">'
+          + '<strong>' + escapeHtml(createViewName(page.pageNumber, view.viewNumber)) + '</strong>'
+          + '<span class="view-name">' + escapeHtml(view.frameName) + '</span>'
           + '</div>'
-          + '</section>'
-          + pageSections
-          + '</main>'
-          + '</body>'
-          + '</html>';
+          + primaryTextLabel
+          + '<div class="view-coords">左上相對座標 x=' + relativeX + ', y=' + relativeY + '</div>'
+          + '<div class="view-controls">'
+          + '<label><span>Page Number</span><input class="page-override-input" type="number" min="1" step="1" value="' + String(page.pageNumber) + '" /></label>'
+          + '<label><span>View Number</span><input class="view-override-input" type="number" min="1" step="1" value="' + String(view.viewNumber) + '" /></label>'
+          + '</div>'
+          + '</div>';
+      })
+      .join('');
+
+    return ''
+      + '<div class="page-group">'
+      + '<div class="page-group-title"><strong>' + createPageName(page.pageNumber) + '</strong> - ' + pageTitle + '</div>'
+      + frameNames
+      + '<div class="view-list">' + views + '</div>'
+      + '</div>';
+  }).join('');
+
+  pagesListContent.innerHTML = items;
+}
+
+function updatePickerSummary() {
+  const currentPages = pageStore.getPages();
+
+  if (!currentPages.length) {
+    pickerNote.textContent = '目前沒有可用的 Page / View。';
+    return;
+  }
+
+  const totalViews = currentPages.reduce((sum, page) => sum + (page.viewCount || page.views.length || 0), 0);
+  pickerNote.textContent =
+    '目前共 ' + String(currentPages.length) + ' 個 Page、' + String(totalViews) + ' 個 View，下載時會全部一起匯出。';
+}
+
+function rerenderPageState() {
+  renderPagesList();
+  updatePickerSummary();
+}
+
+function clearSelectionState(message) {
+  selectionInfo.textContent = message;
+  pageStore.clearPages();
+  rerenderPageState();
+}
+
+function getSelectedExportMode() {
+  return exportModeInputs.find((input) => input.checked)?.value || 'paged';
+}
+
+function handleSelectionInfoMessage(msg) {
+  if (msg.selectionCount === 0) {
+    clearSelectionState('目前沒有選取任何物件，請先選一個父層容器。');
+    return;
+  }
+
+  if (msg.selectionCount !== 1) {
+    clearSelectionState('目前選取 ' + String(msg.selectionCount) + ' 個物件，請只保留一個父層容器。');
+    return;
+  }
+
+  if (!msg.isContainer) {
+    clearSelectionState('目前選取：' + msg.firstSelectionName + '。這不是可分析的父層容器。');
+    return;
+  }
+
+  const coverageNotice = Number(msg.coverageIssueCount || 0) > 0
+    ? '，另外偵測到 ' + String(msg.coverageIssueCount || 0) + ' 個第一層 FRAME 分組異常，已自動補成獨立頁面或標記檢查。'
+    : '';
+
+  selectionInfo.textContent =
+    '目前選取：' + msg.firstSelectionName
+    + '。第一層會匯出 ' + String(msg.eligibleFrameCount || 0) + ' 個 FRAME'
+    + '，忽略 ' + String(msg.ignoredNodeCount || 0) + ' 個非頁面節點。'
+    + coverageNotice;
+
+  pageStore.setPages(pageStore.cloneSelectionPages(msg.pages));
+  rerenderPageState();
+}
+
+async function handlePrepareZipCompleteMessage(msg) {
+  if (!activeZipSession) {
+    throw new Error('沒有可完成的匯出工作階段。');
+  }
+
+  const exportMode = activeZipSession.exportMode;
+  setLoading(true, exportMode === 'all-in-one' ? '正在建立 All in one ZIP...' : '正在建立 Page/View ZIP...');
+
+  const zipPayload = exportMode === 'all-in-one'
+    ? await buildAllInOneZipPayload({
+      ...activeZipSession,
+      containerStructureJson: msg.containerStructureJson,
+      containerPngBytes: msg.containerPngBytes,
+      pages: msg.pages || [],
+    })
+    : finalizePagedZipSession(activeZipSession);
+
+  downloadBlob(zipPayload.blob, zipPayload.fileName);
+  activeZipSession = null;
+  setLoading(true, 'ZIP 已觸發下載，正在關閉 plugin...');
+  parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
+}
+
+closeButton.addEventListener('click', () => {
+  parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
+});
+
+prepareButton.addEventListener('click', () => {
+  const exportMode = getSelectedExportMode();
+  setLoading(true, exportMode === 'all-in-one' ? '正在準備 All in one ZIP...' : '正在分析 Page/View 並建立 ZIP...');
+
+  try {
+    const overrides = pageStore.collectOverrides();
+    parent.postMessage({
+      pluginMessage: {
+        type: 'prepare-zip',
+        exportMode,
+        overrides,
+      },
+    }, '*');
+  } catch (error) {
+    setLoading(false, '');
+    parent.postMessage({
+      pluginMessage: {
+        type: 'error',
+        message: error instanceof Error ? error.message : '匯出編號設定有誤。',
+      },
+    }, '*');
+  }
+});
+
+pagesListContent.addEventListener('change', (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) {
+    return;
+  }
+
+  const row = target.closest('[data-frame-id]');
+  const frameId = row?.getAttribute('data-frame-id') || '';
+  if (!frameId) {
+    return;
+  }
+
+  if (target.classList.contains('page-override-input')) {
+    const location = pageStore.findViewLocation(frameId);
+    const nextPageNumber = normalizeInteger(target.value, location?.page?.pageNumber || 1);
+    target.value = String(nextPageNumber);
+    pageStore.relocateViewByPageNumber(frameId, nextPageNumber);
+    rerenderPageState();
+  }
+
+  if (target.classList.contains('view-override-input')) {
+    const view = pageStore.findViewByFrameId(frameId);
+    const nextViewNumber = normalizeInteger(target.value, view?.viewNumber || 1);
+    target.value = String(nextViewNumber);
+    pageStore.updateViewNumber(frameId, nextViewNumber);
+    renderPagesList();
+  }
+});
+
+window.addEventListener('message', async (event) => {
+  const msg = event.data.pluginMessage;
+
+  if (!msg) {
+    return;
+  }
+
+  if (msg.type === 'selection-info') {
+    handleSelectionInfoMessage(msg);
+  }
+
+  if (msg.type === 'set-loading') {
+    setLoading(
+      Boolean(msg.isLoading),
+      msg.isLoading
+        ? (typeof msg.message === 'string' && msg.message.length > 0 ? msg.message : '正在準備原始資料...')
+        : '',
+    );
+  }
+
+  if (msg.type === 'prepare-zip-start') {
+    activeZipSession = createZipSession(msg);
+    setLoading(
+      true,
+      msg.exportMode === 'all-in-one'
+        ? '正在接收 All in one 原始資料...'
+        : '正在接收 Page/View 串流資料...',
+    );
+  }
+
+  if (msg.type === 'prepare-zip-page') {
+    try {
+      if (!activeZipSession || activeZipSession.exportMode !== 'paged') {
+        throw new Error('目前沒有可用的 Page/View 匯出工作階段。');
       }
 
-      function createAllInOneIndexHtml(payload) {
-        const pageSummary = payload.pages.map((page) => {
-          const viewList = page.views.map((view) => {
-            return '<li>'
-              + escapeHtml(createViewName(page.pageNumber, view.viewNumber))
-              + ' - ' + escapeHtml(view.frameName || '')
-              + ' (x=' + escapeHtml(formatRelativeValue(view.relativeTopLeft?.x))
-              + ', y=' + escapeHtml(formatRelativeValue(view.relativeTopLeft?.y)) + ')'
-              + '</li>';
-          }).join('');
+      setLoading(true, '正在接收 ' + String(msg.pageIndex) + '/' + String(msg.totalPages) + ' 個 Page...');
+      await appendPagedZipPage(activeZipSession, msg.page, setLoading);
+    } catch (error) {
+      console.error(error);
+      activeZipSession = null;
+      setLoading(false, '');
+      parent.postMessage({
+        pluginMessage: {
+          type: 'error',
+          message: error instanceof Error ? error.message : '處理 Page/View 串流資料時發生錯誤。',
+        },
+      }, '*');
+    }
+  }
 
-          return ''
-            + '<section class="page-section">'
-            + '<h2>' + escapeHtml(createPageName(page.pageNumber)) + ' - ' + escapeHtml(page.pageLabel || '') + '</h2>'
-            + '<ul>' + viewList + '</ul>'
-            + '</section>';
-        }).join('');
+  if (msg.type === 'prepare-zip-complete') {
+    try {
+      await handlePrepareZipCompleteMessage(msg);
+    } catch (error) {
+      console.error(error);
+      activeZipSession = null;
+      setLoading(false, '');
+      parent.postMessage({
+        pluginMessage: {
+          type: 'error',
+          message: error instanceof Error ? error.message : '建立 AI ZIP 時發生錯誤。',
+        },
+      }, '*');
+    }
+  }
+});
 
-        return ''
-          + '<!doctype html>'
-          + '<html lang="zh-Hant">'
-          + '<head>'
-          + '<meta charset="utf-8" />'
-          + '<meta name="viewport" content="width=device-width, initial-scale=1" />'
-          + '<title>' + escapeHtml(payload.containerName) + ' - All in one</title>'
-          + '<style>'
-          + 'body{margin:0;padding:24px;font-family:"SF Pro Text","Noto Sans TC",sans-serif;background:#f7efe3;color:#2f241c;}'
-          + 'main{max-width:1200px;margin:0 auto;}'
-          + '.hero,.page-section{background:#fffaf3;border:1px solid rgba(120,84,44,0.12);border-radius:20px;padding:20px;box-shadow:0 12px 30px rgba(80,56,27,0.08);}'
-          + '.page-section{margin-top:18px;}'
-          + 'img{display:block;width:100%;height:auto;border-radius:14px;border:1px solid rgba(120,84,44,0.12);margin-top:16px;background:#fff;}'
-          + 'a{color:#8f5c29;text-decoration:none;font-weight:600;}'
-          + 'a:hover{text-decoration:underline;}'
-          + 'ul{margin:12px 0 0;padding-left:20px;}'
-          + 'li{margin:6px 0;line-height:1.5;}'
-          + '</style>'
-          + '</head>'
-          + '<body>'
-          + '<main>'
-          + '<section class="hero">'
-          + '<h1>' + escapeHtml(payload.containerName) + '</h1>'
-          + '<p>這份 ZIP 是 All in one 模式，包含整個容器的 1 份 structure.json 與 1 張 image.png。</p>'
-          + '<p><a href="structure.json">Open structure.json</a></p>'
-          + '<img src="image.png" alt="' + escapeHtml(payload.containerName) + '" />'
-          + '</section>'
-          + pageSummary
-          + '</main>'
-          + '</body>'
-          + '</html>';
-      }
+renderPagesList();
+updatePickerSummary();
 
-      function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
-        const header = mode === 'paged'
-          ? '# Figma AI Pack - Page/View Export'
-          : '# Figma AI Pack - All in one Export';
+})();
 
-        const summary = [
-          '- source container: ' + String(payload.containerName || ''),
-          '- mode: ' + (mode === 'paged' ? 'Page/View' : 'All in one'),
-          '- exported at: ' + new Date().toISOString(),
-        ];
-
-        const modeSpecific = mode === 'paged'
-          ? [
-            '## 建議閱讀順序',
-            '1. manifest.json',
-            '2. index.html',
-            '3. pages/PageX/page.json',
-            '4. pages/PageX/views/PageX-ViewY/{structure-lite.json,texts.jsonl,image.png}',
-            '',
-            '## 匯出摘要',
-            '- page count: ' + String(pageCount),
-            '- view count: ' + String(totalViewCount),
-          ]
-          : [
-            '## 建議閱讀順序',
-            '1. structure.json',
-            '2. image.png',
-            '3. index.html',
-            '',
-            '## 匯出摘要',
-            '- page count: ' + String(pageCount),
-            '- view count: ' + String(totalViewCount),
-          ];
-
-        return [
-          header,
-          '',
-          '這份 README 會說明此 ZIP 的模式與檔案用途，方便離線交接。',
-          '',
-          '## 基本資訊',
-          ...summary,
-          '',
-          ...modeSpecific,
-          '',
-          '## 主要檔案用途',
-          '- index.html: 快速視覺預覽',
-          '- structure-lite.json: 給 AI/前端生成的精簡語意結構（Page/View）',
-          '- texts.jsonl: 文字索引（保留 id）',
-          '- structure.json: 完整結構（All in one）',
-        ].join('\n');
-      }
-
-      function getPageSummary(pageNumber) {
-        return currentPages.find((page) => page.pageNumber === pageNumber) || null;
-      }
-
-      function formatRelativeValue(value) {
-        return Number.isFinite(value) ? value.toFixed(2) : '0.00';
-      }
-
-      function renderPagesList() {
-        if (!currentPages.length) {
-          pagesListContent.textContent = '目前沒有可用的 Page / View。';
-          return;
-        }
-
-        const items = currentPages.map((page) => {
-          const pageTitle = escapeHtml(page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || createPageName(page.pageNumber));
-          const frameNames = Array.isArray(page.frameNames) && page.frameNames.length
-            ? '<div class="view-frame-names">Frame Names: ' + escapeHtml(page.frameNames.join(' / ')) + '</div>'
-            : '';
-          const views = page.views
-            .map((view) => {
-              const relativeX = formatRelativeValue(view.relativeTopLeft?.x);
-              const relativeY = formatRelativeValue(view.relativeTopLeft?.y);
-              const primaryTextLabel = typeof view.primaryTextLabel === 'string' && view.primaryTextLabel.length > 0
-                ? '<div class="view-primary-text">' + escapeHtml(view.primaryTextLabel) + '</div>'
-                : '';
-
-              return ''
-                + '<div class="view-card" data-frame-id="' + escapeHtml(view.frameId) + '">'
-                + '<div class="view-head">'
-                + '<strong>' + escapeHtml(createViewName(page.pageNumber, view.viewNumber)) + '</strong>'
-                + '<span class="view-name">' + escapeHtml(view.frameName) + '</span>'
-                + '</div>'
-                + primaryTextLabel
-                + '<div class="view-coords">左上相對座標 x=' + relativeX + ', y=' + relativeY + '</div>'
-                + '<div class="view-controls">'
-                + '<label><span>Page Number</span><input class="page-override-input" type="number" min="1" step="1" value="' + String(page.pageNumber) + '" /></label>'
-                + '<label><span>View Number</span><input class="view-override-input" type="number" min="1" step="1" value="' + String(view.viewNumber) + '" /></label>'
-                + '</div>'
-                + '</div>';
-            })
-            .join('');
-
-          return ''
-            + '<div class="page-group">'
-            + '<div class="page-group-title"><strong>' + createPageName(page.pageNumber) + '</strong> - ' + pageTitle + '</div>'
-            + frameNames
-            + '<div class="view-list">' + views + '</div>'
-            + '</div>';
-        }).join('');
-
-        pagesListContent.innerHTML = items;
-      }
-
-      function updatePickerSummary() {
-        if (!currentPages.length) {
-          pickerNote.textContent = '目前沒有可用的 Page / View。';
-          return;
-        }
-
-        const totalViews = currentPages.reduce((sum, page) => sum + (page.viewCount || page.views.length || 0), 0);
-        pickerNote.textContent =
-          '目前共 ' + String(currentPages.length) + ' 個 Page、' + String(totalViews) + ' 個 View，下載時會全部一起匯出。';
-      }
-
-      function normalizeInteger(value, fallback) {
-        const parsed = Number.parseInt(String(value), 10);
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-      }
-
-      function collectOverrides() {
-        if (!currentPages.length) {
-          return [];
-        }
-
-        const seen = new Set();
-
-        return currentPages.flatMap((page) => {
-          return page.views.map((view) => {
-            const pageNumber = normalizeInteger(page.pageNumber, 1);
-            const viewNumber = normalizeInteger(view.viewNumber, 1);
-            const duplicateKey = String(pageNumber) + ':' + String(viewNumber);
-
-            if (seen.has(duplicateKey)) {
-              throw new Error(`Page${String(pageNumber)} / View${String(viewNumber)} 重複，請調整編號。`);
-            }
-
-            seen.add(duplicateKey);
-
-            return {
-              frameId: view.frameId,
-              pageNumber,
-              viewNumber,
-            };
-          });
-        });
-      }
-
-      pagesListContent.addEventListener('change', (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLInputElement)) {
-          return;
-        }
-
-        const row = target.closest('[data-frame-id]');
-        const frameId = row?.getAttribute('data-frame-id') || '';
-        if (!frameId) {
-          return;
-        }
-
-        if (target.classList.contains('page-override-input')) {
-          const location = findViewLocation(frameId);
-          const nextPageNumber = normalizeInteger(target.value, location?.page?.pageNumber || 1);
-          target.value = String(nextPageNumber);
-          relocateViewByPageNumber(frameId, nextPageNumber);
-        }
-
-        if (target.classList.contains('view-override-input')) {
-          const view = findViewByFrameId(frameId);
-          const nextViewNumber = normalizeInteger(target.value, view?.viewNumber || 1);
-          target.value = String(nextViewNumber);
-          updateViewNumber(frameId, nextViewNumber);
-        }
-      });
-
-      async function buildViewBundle(viewPayload) {
-        const sourcePngBytes = toUint8Array(viewPayload.pngBytes);
-        const sourceImage = await loadImageFromBytes(sourcePngBytes);
-        const textsJsonl = buildTextsJsonl(viewPayload.structureJson);
-        const textCount = countTextEntries(textsJsonl);
-        const imageMeta = {
-          path: 'image.png',
-          width: sourceImage.width,
-          height: sourceImage.height,
-          sourceScale: 1,
-        };
-        const structureLite = buildStructureLite(viewPayload.structureJson, imageMeta, textCount);
-
-        return {
-          imageMeta,
-          structureLite,
-          textsJsonl,
-          textCount,
-          imageWidth: sourceImage.width,
-          imageHeight: sourceImage.height,
-          imageBytes: sourcePngBytes,
-        };
-      }
-
-      function getSelectedExportMode() {
-        return exportModeInputs.find((input) => input.checked)?.value || 'paged';
-      }
-
-      async function appendPagedZipPage(session, page) {
-        const pageName = createPageName(page.pageNumber);
-        const pageDir = 'pages/' + pageName;
-        const pageViews = [];
-
-        for (const view of page.views) {
-          const viewName = createViewName(page.pageNumber, view.viewNumber);
-          const viewDir = pageDir + '/views/' + viewName;
-
-          setLoading(true, '正在整理 ' + pageName + ' / View' + String(view.viewNumber) + '...');
-
-          const viewBundle = await buildViewBundle(view);
-
-          session.zipBuilder.addEntry(
-            viewDir + '/structure-lite.json',
-            encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
-          );
-          session.zipBuilder.addEntry(
-            viewDir + '/texts.jsonl',
-            encodeText(viewBundle.textsJsonl),
-          );
-          session.zipBuilder.addEntry(viewDir + '/image.png', viewBundle.imageBytes);
-
-          pageViews.push({
-            viewNumber: view.viewNumber,
-            name: viewName,
-            frameId: view.frameId,
-            frameName: view.frameName,
-            bounds: view.bounds,
-            relativeTopLeft: view.relativeTopLeft,
-            path: viewDir,
-            image: {
-              width: viewBundle.imageWidth,
-              height: viewBundle.imageHeight,
-              path: viewDir + '/image.png',
-            },
-            textCount: viewBundle.textCount,
-          });
-        }
-
-        const pageJson = {
-          format: 'figma-ai-page.v1',
-          source: {
-            containerId: session.containerId,
-            containerName: session.containerName,
-          },
-          pageNumber: page.pageNumber,
-          name: pageName,
-          label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
-          viewCount: pageViews.length,
-          frameNames: Array.isArray(page.frameNames) && page.frameNames.length
-            ? page.frameNames
-            : pageViews.map((view) => view.frameName),
-          views: pageViews,
-        };
-
-        session.zipBuilder.addEntry(
-          pageDir + '/page.json',
-          encodeText(JSON.stringify(pageJson, null, 2)),
-        );
-
-        session.manifestPages.push({
-          pageNumber: page.pageNumber,
-          name: pageName,
-          label: page.pageLabel || (Array.isArray(page.frameNames) ? page.frameNames[0] : '') || pageName,
-          viewCount: pageViews.length,
-          frameNames: Array.isArray(page.frameNames) && page.frameNames.length
-            ? page.frameNames
-            : pageViews.map((view) => view.frameName),
-          views: pageViews.map((view) => ({
-            viewNumber: view.viewNumber,
-            name: view.name,
-            frameId: view.frameId,
-            frameName: view.frameName,
-            bounds: view.bounds,
-            relativeTopLeft: view.relativeTopLeft,
-            path: view.path,
-          })),
-        });
-
-        session.totalViewCount += pageViews.length;
-        session.receivedPages += 1;
-      }
-
-      function finalizePagedZipSession(session) {
-        const manifest = {
-          format: 'figma-ai-pack.v2',
-          source: {
-            id: session.containerId,
-            name: session.containerName,
-          },
-          pageCount: session.manifestPages.length,
-          totalViewCount: session.totalViewCount,
-          ignoredNodeCount: session.ignoredNodes.count,
-          ignoredNodes: session.ignoredNodes.items,
-          pages: session.manifestPages,
-        };
-
-        session.zipBuilder.addEntry('manifest.json', encodeText(JSON.stringify(manifest, null, 2)));
-        session.zipBuilder.addEntry(
-          'index.html',
-          encodeText(createPagedIndexHtml(session, session.manifestPages, session.totalViewCount)),
-        );
-        session.zipBuilder.addEntry(
-          'README.md',
-          encodeText(createExportReadmeMarkdown('paged', session, session.manifestPages.length, session.totalViewCount)),
-        );
-
-        return {
-          blob: session.zipBuilder.buildBlob(),
-          fileName: 'figma-ai-pack-' + session.fileName + '.zip',
-          pageCount: session.manifestPages.length,
-          totalViewCount: session.totalViewCount,
-        };
-      }
-
-      async function buildAllInOneZipPayload(payload) {
-        const containerPngBytes = toUint8Array(payload.containerPngBytes);
-        const containerImage = await loadImageFromBytes(containerPngBytes);
-        const allInOneJson = {
-          format: 'figma-ai-all-in-one.v1',
-          source: {
-            id: payload.containerId,
-            name: payload.containerName,
-          },
-          image: {
-            path: 'image.png',
-            width: containerImage.width,
-            height: containerImage.height,
-            sourceScale: 1,
-          },
-          ignoredNodeCount: payload.ignoredNodes.count,
-          ignoredNodes: payload.ignoredNodes.items,
-          pages: payload.pages.map((page) => ({
-            pageNumber: page.pageNumber,
-            pageLabel: page.pageLabel,
-            frameNames: page.frameNames,
-            views: page.views.map((view) => ({
-              viewNumber: view.viewNumber,
-              frameId: view.frameId,
-              frameName: view.frameName,
-              bounds: view.bounds,
-              relativeTopLeft: view.relativeTopLeft,
-            })),
-          })),
-          structure: payload.containerStructureJson,
-        };
-
-        const zipBuilder = createZipBuilder();
-        zipBuilder.addEntry('index.html', encodeText(createAllInOneIndexHtml(payload)));
-        zipBuilder.addEntry('structure.json', encodeText(JSON.stringify(allInOneJson, null, 2)));
-        zipBuilder.addEntry('image.png', containerPngBytes);
-        zipBuilder.addEntry(
-          'README.md',
-          encodeText(
-            createExportReadmeMarkdown(
-              'all-in-one',
-              payload,
-              Array.isArray(payload.pages) ? payload.pages.length : 0,
-              Array.isArray(payload.pages)
-                ? payload.pages.reduce((sum, page) => sum + (Array.isArray(page.views) ? page.views.length : 0), 0)
-                : 0,
-            ),
-          ),
-        );
-
-        return {
-          blob: zipBuilder.buildBlob(),
-          fileName: 'figma-ai-pack-' + payload.fileName + '-all-in-one.zip',
-        };
-      }
-
-      function createZipSession(msg) {
-        return {
-          exportMode: msg.exportMode,
-          containerId: msg.containerId,
-          containerName: msg.containerName,
-          ignoredNodes: msg.ignoredNodes,
-          fileName: msg.fileName,
-          totalPages: Number(msg.totalPages || 0),
-          manifestPages: [],
-          totalViewCount: 0,
-          receivedPages: 0,
-          zipBuilder: msg.exportMode === 'paged' ? createZipBuilder() : null,
-        };
-      }
-
-      let activeZipSession = null;
-
-      closeButton.addEventListener('click', () => {
-        parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
-      });
-
-      prepareButton.addEventListener('click', () => {
-        const exportMode = getSelectedExportMode();
-        setLoading(true, exportMode === 'all-in-one' ? '正在準備 All in one ZIP...' : '正在分析 Page/View 並建立 ZIP...');
-        try {
-          const overrides = collectOverrides();
-          parent.postMessage({
-            pluginMessage: {
-              type: 'prepare-zip',
-              exportMode,
-              overrides,
-            },
-          }, '*');
-        } catch (error) {
-          setLoading(false, '');
-          parent.postMessage({
-            pluginMessage: {
-              type: 'error',
-              message: error instanceof Error ? error.message : '匯出編號設定有誤。',
-            },
-          }, '*');
-        }
-      });
-
-      window.onmessage = async (event) => {
-        const msg = event.data.pluginMessage;
-
-        if (!msg) {
-          return;
-        }
-
-        if (msg.type === 'selection-info') {
-          if (msg.selectionCount === 0) {
-            selectionInfo.textContent = '目前沒有選取任何物件，請先選一個父層容器。';
-            currentPages = [];
-            renderPagesList();
-            updatePickerSummary();
-          } else if (msg.selectionCount !== 1) {
-            selectionInfo.textContent = '目前選取 ' + String(msg.selectionCount) + ' 個物件，請只保留一個父層容器。';
-            currentPages = [];
-            renderPagesList();
-            updatePickerSummary();
-          } else if (!msg.isContainer) {
-            selectionInfo.textContent = '目前選取：' + msg.firstSelectionName + '。這不是可分析的父層容器。';
-            currentPages = [];
-            renderPagesList();
-            updatePickerSummary();
-          } else {
-            const coverageNotice = Number(msg.coverageIssueCount || 0) > 0
-              ? '，另外偵測到 ' + String(msg.coverageIssueCount || 0) + ' 個第一層 FRAME 分組異常，已自動補成獨立頁面或標記檢查。'
-              : '';
-            selectionInfo.textContent =
-              '目前選取：' + msg.firstSelectionName
-              + '。第一層會匯出 ' + String(msg.eligibleFrameCount || 0) + ' 個 FRAME'
-              + '，忽略 ' + String(msg.ignoredNodeCount || 0) + ' 個非頁面節點。'
-              + coverageNotice;
-            currentPages = cloneSelectionPages(msg.pages);
-            renderPagesList();
-            updatePickerSummary();
-          }
-        }
-
-        if (msg.type === 'set-loading') {
-          setLoading(
-            Boolean(msg.isLoading),
-            msg.isLoading
-              ? (typeof msg.message === 'string' && msg.message.length > 0 ? msg.message : '正在準備原始資料...')
-              : '',
-          );
-        }
-
-        if (msg.type === 'prepare-zip-start') {
-          activeZipSession = createZipSession(msg);
-          setLoading(
-            true,
-            msg.exportMode === 'all-in-one'
-              ? '正在接收 All in one 原始資料...'
-              : '正在接收 Page/View 串流資料...',
-          );
-        }
-
-        if (msg.type === 'prepare-zip-page') {
-          try {
-            if (!activeZipSession || activeZipSession.exportMode !== 'paged') {
-              throw new Error('目前沒有可用的 Page/View 匯出工作階段。');
-            }
-
-            setLoading(true, '正在接收 ' + String(msg.pageIndex) + '/' + String(msg.totalPages) + ' 個 Page...');
-            await appendPagedZipPage(activeZipSession, msg.page);
-          } catch (error) {
-            console.error(error);
-            activeZipSession = null;
-            setLoading(false, '');
-            parent.postMessage({
-              pluginMessage: {
-                type: 'error',
-                message: error instanceof Error ? error.message : '處理 Page/View 串流資料時發生錯誤。',
-              },
-            }, '*');
-          }
-        }
-
-        if (msg.type === 'prepare-zip-complete') {
-          try {
-            if (!activeZipSession) {
-              throw new Error('沒有可完成的匯出工作階段。');
-            }
-
-            const exportMode = activeZipSession.exportMode;
-            setLoading(true, exportMode === 'all-in-one' ? '正在建立 All in one ZIP...' : '正在建立 Page/View ZIP...');
-            const zipPayload = exportMode === 'all-in-one'
-              ? await buildAllInOneZipPayload({
-                ...activeZipSession,
-                containerStructureJson: msg.containerStructureJson,
-                containerPngBytes: msg.containerPngBytes,
-                pages: msg.pages || [],
-              })
-              : finalizePagedZipSession(activeZipSession);
-            downloadBlob(zipPayload.blob, zipPayload.fileName);
-            activeZipSession = null;
-            setLoading(true, 'ZIP 已觸發下載，正在關閉 plugin...');
-            parent.postMessage({ pluginMessage: { type: 'close' } }, '*');
-          } catch (error) {
-            console.error(error);
-            activeZipSession = null;
-            setLoading(false, '');
-            parent.postMessage({
-              pluginMessage: {
-                type: 'error',
-                message: error instanceof Error ? error.message : '建立 AI ZIP 時發生錯誤。',
-              },
-            }, '*');
-          }
-        }
-      };
-
-      renderPagesList();
-      updatePickerSummary();
-    </script>
+</script>
   </body>
 </html>
