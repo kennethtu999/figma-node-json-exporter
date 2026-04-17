@@ -13,6 +13,35 @@ const exportModeInputs = Array.from(document.querySelectorAll('input[name="expor
 const pageStore = createPageStore();
 let activeZipSession = null;
 
+function postUiError(message) {
+  parent.postMessage({
+    pluginMessage: {
+      type: 'error',
+      message,
+    },
+  }, '*');
+}
+
+function resetActiveZipSessionWithError(error, fallbackMessage) {
+  console.error(error);
+  activeZipSession = null;
+  setLoading(false, '');
+  postUiError(error instanceof Error ? error.message : fallbackMessage);
+}
+
+function enqueuePagedZipPage(session, msg) {
+  session.pageAppendQueue = session.pageAppendQueue.then(async () => {
+    if (!activeZipSession || activeZipSession !== session || session.exportMode !== 'paged') {
+      throw new Error('目前沒有可用的 Page/View 匯出工作階段。');
+    }
+
+    setLoading(true, '正在接收 ' + String(msg.pageIndex) + '/' + String(msg.totalPages) + ' 個 Page...');
+    await appendPagedZipPage(session, msg.page, setLoading);
+  });
+
+  return session.pageAppendQueue;
+}
+
 function setLoading(isLoading, message) {
   closeButton.disabled = isLoading;
   prepareButton.disabled = isLoading;
@@ -141,17 +170,32 @@ async function handlePrepareZipCompleteMessage(msg) {
     throw new Error('沒有可完成的匯出工作階段。');
   }
 
-  const exportMode = activeZipSession.exportMode;
+  const session = activeZipSession;
+  const exportMode = session.exportMode;
   setLoading(true, exportMode === 'all-in-one' ? '正在建立 All in one ZIP...' : '正在建立 Page/View ZIP...');
+
+  if (exportMode === 'paged') {
+    await session.pageAppendQueue;
+
+    if (session.receivedPages !== session.totalPages) {
+      throw new Error(
+        'Page/View 串流尚未完整接收（已接收 '
+        + String(session.receivedPages)
+        + '/'
+        + String(session.totalPages)
+        + ' 個 Page），請重試。',
+      );
+    }
+  }
 
   const zipPayload = exportMode === 'all-in-one'
     ? await buildAllInOneZipPayload({
-      ...activeZipSession,
+      ...session,
       containerStructureJson: msg.containerStructureJson,
       containerPngBytes: msg.containerPngBytes,
       pages: msg.pages || [],
     }, setLoading)
-    : await finalizePagedZipSession(activeZipSession, setLoading);
+    : await finalizePagedZipSession(session, setLoading);
 
   downloadBlob(zipPayload.blob, zipPayload.fileName);
   activeZipSession = null;
@@ -247,23 +291,18 @@ window.addEventListener('message', async (event) => {
   }
 
   if (msg.type === 'prepare-zip-page') {
-    try {
-      if (!activeZipSession || activeZipSession.exportMode !== 'paged') {
-        throw new Error('目前沒有可用的 Page/View 匯出工作階段。');
-      }
+    if (!activeZipSession || activeZipSession.exportMode !== 'paged') {
+      resetActiveZipSessionWithError(
+        new Error('目前沒有可用的 Page/View 匯出工作階段。'),
+        '處理 Page/View 串流資料時發生錯誤。',
+      );
+      return;
+    }
 
-      setLoading(true, '正在接收 ' + String(msg.pageIndex) + '/' + String(msg.totalPages) + ' 個 Page...');
-      await appendPagedZipPage(activeZipSession, msg.page, setLoading);
+    try {
+      await enqueuePagedZipPage(activeZipSession, msg);
     } catch (error) {
-      console.error(error);
-      activeZipSession = null;
-      setLoading(false, '');
-      parent.postMessage({
-        pluginMessage: {
-          type: 'error',
-          message: error instanceof Error ? error.message : '處理 Page/View 串流資料時發生錯誤。',
-        },
-      }, '*');
+      resetActiveZipSessionWithError(error, '處理 Page/View 串流資料時發生錯誤。');
     }
   }
 
@@ -271,15 +310,8 @@ window.addEventListener('message', async (event) => {
     try {
       await handlePrepareZipCompleteMessage(msg);
     } catch (error) {
-      console.error(error);
-      activeZipSession = null;
-      setLoading(false, '');
-      parent.postMessage({
-        pluginMessage: {
-          type: 'error',
-          message: error instanceof Error ? error.message : '建立 AI ZIP 時發生錯誤。',
-        },
-      }, '*');
+      resetActiveZipSessionWithError(error, '建立 AI ZIP 時發生錯誤。');
+      return;
     }
   }
 });

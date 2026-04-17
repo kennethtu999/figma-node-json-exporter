@@ -354,6 +354,14 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
 
 async function buildViewBundle(viewPayload) {
   const sourcePngBytes = toUint8Array(viewPayload.pngBytes);
+  if (sourcePngBytes.length === 0) {
+    throw new Error(
+      '匯出 '
+      + String(viewPayload.frameName || viewPayload.frameId || 'View')
+      + ' 的 image.png 失敗，收到空白 PNG 資料。',
+    );
+  }
+
   const textsJsonl = buildTextsJsonl(viewPayload.structureJson);
   const textCount = countTextNodes(viewPayload.structureJson);
   const imageMeta = createImageMeta('image.png', viewPayload.bounds);
@@ -531,6 +539,10 @@ export async function finalizePagedZipSession(session, setLoading) {
 
 export async function buildAllInOneZipPayload(payload, setLoading) {
   const containerPngBytes = toUint8Array(payload.containerPngBytes);
+  if (containerPngBytes.length === 0) {
+    throw new Error('匯出整體 image.png 失敗，收到空白 PNG 資料。');
+  }
+
   const imageMeta = createImageMeta('image.png', getBounds(payload.containerStructureJson));
   const textCount = countTextNodes(payload.containerStructureJson);
   const {
@@ -626,6 +638,7 @@ export function createZipSession(msg) {
     manifestPages: [],
     totalViewCount: 0,
     receivedPages: 0,
+    pageAppendQueue: Promise.resolve(),
     zipBuilder: msg.exportMode === 'paged' ? createZipBuilder() : null,
   };
 }
