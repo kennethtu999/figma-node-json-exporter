@@ -150,8 +150,8 @@ async function handlePrepareZipCompleteMessage(msg) {
       containerStructureJson: msg.containerStructureJson,
       containerPngBytes: msg.containerPngBytes,
       pages: msg.pages || [],
-    })
-    : finalizePagedZipSession(activeZipSession);
+    }, setLoading)
+    : await finalizePagedZipSession(activeZipSession, setLoading);
 
   downloadBlob(zipPayload.blob, zipPayload.fileName);
   activeZipSession = null;

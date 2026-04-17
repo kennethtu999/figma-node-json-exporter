@@ -1,15 +1,44 @@
 import {
-  buildStructureLite,
+  buildStructureArtifacts,
   buildTextsJsonl,
-  countTextEntries,
+  countTextNodes,
   createZipBuilder,
   encodeText,
   escapeHtml,
   formatRelativeValue,
-  loadImageFromBytes,
+  getBounds,
   toUint8Array,
 } from './shared.js';
 import { createPageName, createViewName } from './pages.js';
+
+function waitForUiTurn() {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+}
+
+const SUBTREE_YIELD_INTERVAL = 20;
+
+function encodeJson(value, pretty = false) {
+  return encodeText(JSON.stringify(value, null, pretty ? 2 : 0));
+}
+
+function normalizeImageDimension(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 1;
+  }
+
+  return Math.max(1, Math.round(value));
+}
+
+function createImageMeta(path, bounds) {
+  return {
+    path,
+    width: normalizeImageDimension(bounds?.width),
+    height: normalizeImageDimension(bounds?.height),
+    sourceScale: 1,
+  };
+}
 
 function createPagedIndexHtml(payload, manifestPages, totalViewCount) {
   const pageSections = manifestPages.map((page) => {
@@ -17,6 +46,9 @@ function createPagedIndexHtml(payload, manifestPages, totalViewCount) {
       const bounds = view.bounds || {};
       const relativeTopLeft = view.relativeTopLeft || {};
       const imagePath = escapeHtml(view.path + '/image.png');
+      const tokensPath = escapeHtml(view.path + '/tokens.json');
+      const componentsPath = escapeHtml(view.path + '/components.jsonl');
+      const indexPath = escapeHtml(view.path + '/structure-index.json');
       const litePath = escapeHtml(view.path + '/structure-lite.json');
       const textsPath = escapeHtml(view.path + '/texts.jsonl');
 
@@ -33,6 +65,9 @@ function createPagedIndexHtml(payload, manifestPages, totalViewCount) {
         + '</div>'
         + '<div class="view-links">'
         + '<a href="' + imagePath + '">image</a>'
+        + '<a href="' + indexPath + '">structure-index</a>'
+        + '<a href="' + tokensPath + '">tokens</a>'
+        + '<a href="' + componentsPath + '">components</a>'
         + '<a href="' + litePath + '">structure-lite</a>'
         + '<a href="' + textsPath + '">texts</a>'
         + '</div>'
@@ -145,6 +180,8 @@ function createAllInOneIndexHtml(payload) {
     + '<section class="hero">'
     + '<h1>' + escapeHtml(payload.containerName) + '</h1>'
     + '<p>這份 ZIP 是 All in one 模式，包含整個容器的 1 份 structure.json 與 1 張 image.png。</p>'
+    + '<p><a href="structure-index.json">Open structure-index.json</a></p>'
+    + '<p><a href="tokens.json">Open tokens.json</a> · <a href="components.jsonl">Open components.jsonl</a> · <a href="layout-blocks.jsonl">Open layout-blocks.jsonl</a> · <a href="text-groups.jsonl">Open text-groups.jsonl</a></p>'
     + '<p><a href="structure.json">Open structure.json</a></p>'
     + '<img src="image.png" alt="' + escapeHtml(payload.containerName) + '" />'
     + '</section>'
@@ -165,13 +202,25 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
     '- exported at: ' + new Date().toISOString(),
   ];
 
+  const preflight = [
+    '## 開始前',
+    '1. 在開始分析、檢索或產生程式前，先對目前資料夾內所有 `.json` 檔做一次 format。',
+    '2. 建議命令：`find . -type f -name "*.json" -print0 | while IFS= read -r -d "" file; do tmp="${file}.tmp"; jq -S . "$file" > "$tmp" && mv "$tmp" "$file"; done`',
+    '3. 不要對 `.jsonl` 做 pretty format；`jsonl` 必須維持一行一筆紀錄。',
+    '4. 完成 format 後，再依下列閱讀順序與任務流程開始處理。',
+  ];
+
   const modeSpecific = mode === 'paged'
     ? [
       '## 建議閱讀順序',
       '1. manifest.json',
       '2. index.html',
       '3. pages/PageX/page.json',
-      '4. pages/PageX/views/PageX-ViewY/{structure-lite.json,texts.jsonl,image.png}',
+      '4. pages/PageX/views/PageX-ViewY/{texts.jsonl,image.png}',
+      '5. pages/PageX/views/PageX-ViewY/structure-index.json',
+      '6. pages/PageX/views/PageX-ViewY/subtrees/<subtreeId>.json',
+      '7. pages/PageX/views/PageX-ViewY/{components.jsonl,tokens.json,layout-blocks.jsonl,text-groups.jsonl}',
+      '8. pages/PageX/views/PageX-ViewY/structure-lite.json',
       '',
       '## 匯出摘要',
       '- page count: ' + String(pageCount),
@@ -181,7 +230,10 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
       '## 建議閱讀順序',
       '1. index.html',
       '2. image.png',
-      '3. structure.json',
+      '3. structure-index.json',
+      '4. subtrees/<subtreeId>.json',
+      '5. {components.jsonl,tokens.json,layout-blocks.jsonl,text-groups.jsonl}',
+      '6. structure.json',
       '',
       '## 匯出摘要',
       '- page count: ' + String(pageCount),
@@ -195,13 +247,25 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
       '- page.json: 單一 page 的摘要與 view 清單',
       '- index.html: 快速視覺預覽',
       '- texts.jsonl: 文字索引（保留 id 與 path）',
-      '- image.png: 與結構對照的畫面截圖',
+      '- image.png: 與結構對照的畫面截圖，也是最終視覺比對基準',
+      '- structure-index.json: 給 AI agent 先檢索 node / 區塊的輕量索引，適合搭配 jq 使用',
+      '- subtrees/<subtreeId>.json: 區塊級結構切片，適合局部分析與生成',
+      '- components.jsonl: component / instance 摘要清單',
+      '- tokens.json: 顏色、字體、間距、圓角、效果等 token 彙總',
+      '- layout-blocks.jsonl: 可能作為 section / block 的容器摘要',
+      '- text-groups.jsonl: 依容器分組的文字集合',
       '- structure-lite.json: 給 AI/前端生成的精簡語意結構（Page/View）',
     ]
     : [
       '## 主要檔案用途',
       '- index.html: 快速視覺預覽與 page/view 摘要',
-      '- image.png: 整個容器的完整畫面',
+      '- image.png: 整個容器的完整畫面，也是最終視覺比對基準',
+      '- structure-index.json: 給 AI agent 先檢索 node / 區塊的輕量索引，適合搭配 jq 使用',
+      '- subtrees/<subtreeId>.json: 區塊級結構切片，適合局部分析與生成',
+      '- components.jsonl: component / instance 摘要清單',
+      '- tokens.json: 顏色、字體、間距、圓角、效果等 token 彙總',
+      '- layout-blocks.jsonl: 可能作為 section / block 的容器摘要',
+      '- text-groups.jsonl: 依容器分組的文字集合',
       '- structure.json: All in one 的完整結構與 page/view 摘要',
     ];
 
@@ -211,35 +275,63 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
       '1. 先讀 manifest.json，確認有哪些 page / view 與各自路徑。',
       '2. 再讀目標 pages/PageX/page.json，縮小到要處理的 view。',
       '3. 先用 texts.jsonl 與 image.png 理解文案與畫面對照。',
-      '4. 只有在需要重建 layout / component tree / 樣式時，再局部查看 structure-lite.json。',
+      '4. 再讀 structure-index.json，用 id / path / type / textPreview 定位目標 node 或區塊。',
+      '5. 需要區塊級上下文時讀 subtrees/<subtreeId>.json；任務偏向 component / token / layout / copy 時優先讀對應 sidecar 檔。',
+      '6. 需要節點細節時，先用 jq 從 structure-lite.json 局部抽出該 node、祖先鏈與必要兄弟摘要。',
+      '7. 只有在需要完整 fallback / 深入樣式脈絡時，再局部查看 structure-lite.json。',
+      '8. 產生結果後，最後以 image.png 做視覺比對與驗收。',
       '',
       '## 任務對應檔案',
       '- 找文案、比對文字內容、抽取可翻譯字串：優先讀 texts.jsonl。',
       '- 看畫面區塊、比對視覺位置、人工快速理解：優先讀 image.png 與 index.html。',
-      '- 重建 layout、推 flex / auto layout、分析 component 結構：再讀 structure-lite.json。',
+      '- 找 node、縮小區塊範圍、決定下一步要讀哪段結構：優先讀 structure-index.json。',
+      '- 追某一個 node 的樣式與 metadata：先用 structure-index.json 找 id，再用 jq 從 structure-lite.json 局部抽取。',
+      '- 分析某個區塊、做局部生成：優先讀 subtrees/<subtreeId>.json。',
+      '- 找重複元件：優先讀 components.jsonl。',
+      '- 抽設計 token：優先讀 tokens.json。',
+      '- 分析容器切塊：優先讀 layout-blocks.jsonl。',
+      '- 比對區塊文案集合：優先讀 text-groups.jsonl。',
+      '- 重建完整 layout 脈絡或做 fallback：再讀 structure-lite.json。',
+      '- 最終確認生成結果是否貼近設計：回頭比對 image.png。',
       '',
       '## 大 JSON 使用原則',
       '- 不要把整份 structure-lite.json 直接貼進 prompt。',
-      '- 先用 manifest.json / page.json / texts.jsonl 定位目標區塊，再從 structure-lite.json 抽相關 subtree。',
+      '- 此模式預設不輸出 nodes/<id>.json。',
+      '- 先用 manifest.json / page.json / texts.jsonl / structure-index.json 定位目標區塊，再優先改讀 subtrees/<subtreeId>.json 或用 jq 查 structure-lite.json。',
       '- 只提供與任務有關的節點、祖先鏈、必要的兄弟節點摘要給模型。',
-      '- structure-lite.json 是資料來源，不是 prompt 本體。',
+      '- structure-lite.json 是資料來源，不是 prompt 本體；structure-index.json 才是預設入口，subtree 與 task sidecar 才是預設詳細讀取單位。',
+      '- 若 lite 很大，優先用 jq 做條件查詢、切 subtree、抽單一路徑，不要整份展開。',
     ]
     : [
       '## AI Agent 建議流程',
       '1. 先讀 index.html 與 image.png，建立整體畫面與區塊分布的全局認知。',
-      '2. 若只需定位 page / view 或某個區塊，先參考 structure.json 內的 pages 摘要。',
-      '3. 只有在需要完整 fallback / debug / 深入結構分析時，再局部查看 structure.json 的 structure 內容。',
+      '2. 再讀 structure-index.json，用 id / path / type / textPreview 定位 page / view 或某個區塊。',
+      '3. 需要區塊結構時讀 subtrees/<subtreeId>.json；任務偏向 component / token / layout / copy 時優先讀對應 sidecar 檔。',
+      '4. 若只需 page / view 對照，可先參考 structure.json 內的 pages 摘要。',
+      '5. 需要節點細節時，先用 jq 從 structure.json 的 structure 區段局部抽出該 node、祖先鏈與必要兄弟摘要。',
+      '6. 只有在需要完整 fallback / debug / 深入結構分析時，再局部查看 structure.json 的 structure 內容。',
+      '7. 產生結果後，最後以 image.png 做視覺比對與驗收。',
       '',
       '## 任務對應檔案',
       '- 快速理解整體畫面與章節分布：優先讀 index.html 與 image.png。',
+      '- 找 node、縮小區塊範圍、決定下一步要讀哪段結構：優先讀 structure-index.json。',
+      '- 追某一個 node 的樣式與 metadata：先用 structure-index.json 找 id，再用 jq 從 structure.json 局部抽取。',
+      '- 分析某個區塊、做局部生成：優先讀 subtrees/<subtreeId>.json。',
+      '- 找重複元件：優先讀 components.jsonl。',
+      '- 抽設計 token：優先讀 tokens.json。',
+      '- 分析容器切塊：優先讀 layout-blocks.jsonl。',
+      '- 比對區塊文案集合：優先讀 text-groups.jsonl。',
       '- 找 page / view 對照與 frame 摘要：優先讀 structure.json 內的 pages。',
       '- 做完整 debug、容器級結構分析、缺少 Page/View 資料時的 fallback：再讀 structure.json。',
+      '- 最終確認生成結果是否貼近設計：回頭比對 image.png。',
       '',
       '## 大 JSON 使用原則',
       '- 不要把整份 structure.json 一次全文餵給模型。',
-      '- 先從 index.html、image.png、pages 摘要定位範圍，再抽出相關結構片段。',
+      '- 此模式預設不輸出 nodes/<id>.json。',
+      '- 先從 index.html、image.png、structure-index.json、pages 摘要定位範圍，再優先改讀 subtrees/<subtreeId>.json 或用 jq 查 structure.json。',
       '- structure.json 是完整 fallback / debug 資料，適合檢索後局部使用。',
-      '- structure.json 是資料來源，不是 prompt 本體。',
+      '- structure.json 是資料來源，不是 prompt 本體；structure-index.json 才是預設入口，subtree 與 task sidecar 才是預設詳細讀取單位。',
+      '- 若 structure.json 很大，優先用 jq 做條件查詢、切 subtree、抽單一路徑，不要整份展開。',
     ];
 
   return [
@@ -249,6 +341,8 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
     '',
     '## 基本資訊',
     ...summary,
+    '',
+    ...preflight,
     '',
     ...modeSpecific,
     '',
@@ -260,24 +354,36 @@ function createExportReadmeMarkdown(mode, payload, pageCount, totalViewCount) {
 
 async function buildViewBundle(viewPayload) {
   const sourcePngBytes = toUint8Array(viewPayload.pngBytes);
-  const sourceImage = await loadImageFromBytes(sourcePngBytes);
   const textsJsonl = buildTextsJsonl(viewPayload.structureJson);
-  const textCount = countTextEntries(textsJsonl);
-  const imageMeta = {
-    path: 'image.png',
-    width: sourceImage.width,
-    height: sourceImage.height,
-    sourceScale: 1,
-  };
-  const structureLite = buildStructureLite(viewPayload.structureJson, imageMeta, textCount);
+  const textCount = countTextNodes(viewPayload.structureJson);
+  const imageMeta = createImageMeta('image.png', viewPayload.bounds);
+  const {
+    structureLite,
+    structureIndex,
+    subtrees,
+    componentsJsonl,
+    tokensJson,
+    layoutBlocksJsonl,
+    textGroupsJsonl,
+  } = buildStructureArtifacts(
+    viewPayload.structureJson,
+    imageMeta,
+    textCount,
+  );
 
   return {
     imageMeta,
     structureLite,
+    structureIndex,
+    subtrees,
+    componentsJsonl,
+    tokensJson,
+    layoutBlocksJsonl,
+    textGroupsJsonl,
     textsJsonl,
     textCount,
-    imageWidth: sourceImage.width,
-    imageHeight: sourceImage.height,
+    imageWidth: imageMeta.width,
+    imageHeight: imageMeta.height,
     imageBytes: sourcePngBytes,
   };
 }
@@ -294,16 +400,31 @@ export async function appendPagedZipPage(session, page, setLoading) {
     setLoading(true, '正在整理 ' + pageName + ' / View' + String(view.viewNumber) + '...');
 
     const viewBundle = await buildViewBundle(view);
+    await waitForUiTurn();
 
-    session.zipBuilder.addEntry(
-      viewDir + '/structure-lite.json',
-      encodeText(JSON.stringify(viewBundle.structureLite, null, 2)),
-    );
+    session.zipBuilder.addEntry(viewDir + '/structure-lite.json', encodeJson(viewBundle.structureLite));
+    session.zipBuilder.addEntry(viewDir + '/structure-index.json', encodeJson(viewBundle.structureIndex));
+    for (let index = 0; index < viewBundle.subtrees.length; index += 1) {
+      const entry = viewBundle.subtrees[index];
+      session.zipBuilder.addEntry(
+        viewDir + '/' + entry.path,
+        encodeJson(entry.data),
+      );
+
+      if ((index + 1) % SUBTREE_YIELD_INTERVAL === 0) {
+        await waitForUiTurn();
+      }
+    }
     session.zipBuilder.addEntry(
       viewDir + '/texts.jsonl',
       encodeText(viewBundle.textsJsonl),
     );
+    session.zipBuilder.addEntry(viewDir + '/components.jsonl', encodeText(viewBundle.componentsJsonl));
+    session.zipBuilder.addEntry(viewDir + '/tokens.json', encodeJson(viewBundle.tokensJson));
+    session.zipBuilder.addEntry(viewDir + '/layout-blocks.jsonl', encodeText(viewBundle.layoutBlocksJsonl));
+    session.zipBuilder.addEntry(viewDir + '/text-groups.jsonl', encodeText(viewBundle.textGroupsJsonl));
     session.zipBuilder.addEntry(viewDir + '/image.png', viewBundle.imageBytes);
+    await waitForUiTurn();
 
     pageViews.push({
       viewNumber: view.viewNumber,
@@ -340,7 +461,7 @@ export async function appendPagedZipPage(session, page, setLoading) {
 
   session.zipBuilder.addEntry(
     pageDir + '/page.json',
-    encodeText(JSON.stringify(pageJson, null, 2)),
+    encodeJson(pageJson, true),
   );
 
   session.manifestPages.push({
@@ -366,7 +487,11 @@ export async function appendPagedZipPage(session, page, setLoading) {
   session.receivedPages += 1;
 }
 
-export function finalizePagedZipSession(session) {
+export async function finalizePagedZipSession(session, setLoading) {
+  if (typeof setLoading === 'function') {
+    setLoading(true, '正在整理 ZIP 索引...');
+  }
+
   const manifest = {
     format: 'figma-ai-pack.v2',
     source: {
@@ -389,6 +514,12 @@ export function finalizePagedZipSession(session) {
     'README.md',
     encodeText(createExportReadmeMarkdown('paged', session, session.manifestPages.length, session.totalViewCount)),
   );
+  await waitForUiTurn();
+
+  if (typeof setLoading === 'function') {
+    setLoading(true, '正在組裝 ZIP Blob...');
+  }
+  await waitForUiTurn();
 
   return {
     blob: session.zipBuilder.buildBlob(),
@@ -398,21 +529,31 @@ export function finalizePagedZipSession(session) {
   };
 }
 
-export async function buildAllInOneZipPayload(payload) {
+export async function buildAllInOneZipPayload(payload, setLoading) {
   const containerPngBytes = toUint8Array(payload.containerPngBytes);
-  const containerImage = await loadImageFromBytes(containerPngBytes);
+  const imageMeta = createImageMeta('image.png', getBounds(payload.containerStructureJson));
+  const textCount = countTextNodes(payload.containerStructureJson);
+  const {
+    structureIndex,
+    subtrees,
+    componentsJsonl,
+    tokensJson,
+    layoutBlocksJsonl,
+    textGroupsJsonl,
+  } = buildStructureArtifacts(payload.containerStructureJson, imageMeta, textCount);
+  await waitForUiTurn();
+
+  if (typeof setLoading === 'function') {
+    setLoading(true, '正在整理 All in one 結構...');
+  }
+
   const allInOneJson = {
     format: 'figma-ai-all-in-one.v1',
     source: {
       id: payload.containerId,
       name: payload.containerName,
     },
-    image: {
-      path: 'image.png',
-      width: containerImage.width,
-      height: containerImage.height,
-      sourceScale: 1,
-    },
+    image: imageMeta,
     ignoredNodeCount: payload.ignoredNodes.count,
     ignoredNodes: payload.ignoredNodes.items,
     pages: payload.pages.map((page) => ({
@@ -432,7 +573,26 @@ export async function buildAllInOneZipPayload(payload) {
 
   const zipBuilder = createZipBuilder();
   zipBuilder.addEntry('index.html', encodeText(createAllInOneIndexHtml(payload)));
-  zipBuilder.addEntry('structure.json', encodeText(JSON.stringify(allInOneJson, null, 2)));
+  zipBuilder.addEntry('structure-index.json', encodeJson(structureIndex));
+  for (let index = 0; index < subtrees.length; index += 1) {
+    const entry = subtrees[index];
+    zipBuilder.addEntry(entry.path, encodeJson(entry.data));
+    if ((index + 1) % SUBTREE_YIELD_INTERVAL === 0) {
+      await waitForUiTurn();
+    }
+  }
+  await waitForUiTurn();
+
+  if (typeof setLoading === 'function') {
+    setLoading(true, '正在組裝 All in one ZIP...');
+  }
+  await waitForUiTurn();
+
+  zipBuilder.addEntry('components.jsonl', encodeText(componentsJsonl));
+  zipBuilder.addEntry('tokens.json', encodeJson(tokensJson));
+  zipBuilder.addEntry('layout-blocks.jsonl', encodeText(layoutBlocksJsonl));
+  zipBuilder.addEntry('text-groups.jsonl', encodeText(textGroupsJsonl));
+  zipBuilder.addEntry('structure.json', encodeJson(allInOneJson));
   zipBuilder.addEntry('image.png', containerPngBytes);
   zipBuilder.addEntry(
     'README.md',
@@ -447,6 +607,7 @@ export async function buildAllInOneZipPayload(payload) {
       ),
     ),
   );
+  await waitForUiTurn();
 
   return {
     blob: zipBuilder.buildBlob(),
